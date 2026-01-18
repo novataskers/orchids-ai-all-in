@@ -6,8 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Slider } from "@/components/ui/slider";
 import { Progress } from "@/components/ui/progress";
+import { Slider } from "@/components/ui/slider";
 import {
   Download,
   FileVideo,
@@ -35,6 +35,7 @@ type GeneratedClip = {
   id: number;
   filename: string;
   downloadUrl: string;
+  thumbnailUrl?: string;
   start: number;
   end: number;
   duration: number;
@@ -81,10 +82,11 @@ export default function OpusPage() {
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
 
-  const [clipDuration, setClipDuration] = useState(60);
+  const [clipDuration, setClipDuration] = useState(30);
   const [maxClips, setMaxClips] = useState(5);
-  const [aspectRatio, setAspectRatio] = useState<"9:16" | "16:9" | "1:1">("9:16");
+  const [aspectRatio, setAspectRatio] = useState<"9:16" | "16:9">("9:16");
   const [addCaptions, setAddCaptions] = useState(true);
+  const [captionStyle, setCaptionStyle] = useState<"classic" | "bold" | "outline" | "glow">("bold");
 
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -165,6 +167,7 @@ export default function OpusPage() {
           maxClips,
           aspectRatio,
           addCaptions,
+          captionStyle,
         }),
       });
 
@@ -255,18 +258,32 @@ export default function OpusPage() {
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <Label className="font-mono text-sm text-zinc-400">Clip Duration</Label>
-                      <span className="font-mono text-sm text-purple-400">{clipDuration}s</span>
+                      <span className="font-mono text-sm text-purple-400">&lt;{clipDuration}s</span>
                     </div>
-                    <Slider
-                      value={[clipDuration]}
-                      onValueChange={(v) => setClipDuration(v[0])}
-                      min={15}
-                      max={180}
-                      step={15}
+                    <RadioGroup
+                      value={String(clipDuration)}
+                      onValueChange={(v) => setClipDuration(Number(v))}
+                      className="flex gap-4"
                       disabled={isSubmitting}
-                      className="w-full"
-                    />
-                    <p className="font-mono text-xs text-zinc-600">15s - 180s per clip</p>
+                    >
+                      {[
+                        { value: "30", label: "<30s" },
+                        { value: "60", label: "<60s" },
+                      ].map((opt) => (
+                        <label
+                          key={opt.value}
+                          className={`flex cursor-pointer items-center justify-center rounded-lg border-2 px-4 py-2 transition-all ${
+                            clipDuration === Number(opt.value)
+                              ? "border-purple-500 bg-purple-500/10"
+                              : "border-zinc-800 bg-zinc-900/50 hover:border-zinc-700"
+                          }`}
+                        >
+                          <RadioGroupItem value={opt.value} className="sr-only" />
+                          <span className="font-mono text-sm text-zinc-200">{opt.label}</span>
+                        </label>
+                      ))}
+                    </RadioGroup>
+                    <p className="font-mono text-xs text-zinc-600">TikTok/Reels max: 60s</p>
                   </div>
 
                   <div className="space-y-3">
@@ -291,14 +308,13 @@ export default function OpusPage() {
                   <Label className="font-mono text-sm text-zinc-400">Aspect Ratio</Label>
                   <RadioGroup
                     value={aspectRatio}
-                    onValueChange={(v) => setAspectRatio(v as "9:16" | "16:9" | "1:1")}
-                    className="grid grid-cols-3 gap-3"
+                    onValueChange={(v) => setAspectRatio(v as "9:16" | "16:9")}
+                    className="grid grid-cols-2 gap-3"
                     disabled={isSubmitting}
                   >
                     {[
                       { value: "9:16", label: "9:16", desc: "TikTok/Reels" },
                       { value: "16:9", label: "16:9", desc: "YouTube" },
-                      { value: "1:1", label: "1:1", desc: "Instagram" },
                     ].map((ratio) => (
                       <label
                         key={ratio.value}
@@ -316,19 +332,52 @@ export default function OpusPage() {
                   </RadioGroup>
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    id="add-captions"
-                    checked={addCaptions}
-                    onChange={(e) => setAddCaptions(e.target.checked)}
-                    disabled={isSubmitting}
-                    className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-purple-600 focus:ring-purple-500"
-                  />
-                  <Label htmlFor="add-captions" className="font-mono text-sm text-zinc-300 cursor-pointer">
-                    <Captions className="inline w-4 h-4 mr-2" />
-                    Add AI-generated captions (coming soon)
-                  </Label>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      id="add-captions"
+                      checked={addCaptions}
+                      onChange={(e) => setAddCaptions(e.target.checked)}
+                      disabled={isSubmitting}
+                      className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-purple-600 focus:ring-purple-500"
+                    />
+                    <Label htmlFor="add-captions" className="font-mono text-sm text-zinc-300 cursor-pointer">
+                      <Captions className="inline w-4 h-4 mr-2" />
+                      Add AI-generated captions
+                    </Label>
+                  </div>
+
+                  {addCaptions && (
+                    <div className="mt-4 space-y-3 pl-7">
+                      <Label className="font-mono text-xs text-zinc-500">Caption Style</Label>
+                      <div className="grid grid-cols-2 gap-3">
+                        {[
+                          { value: "classic", label: "Classic", preview: "Aa", bg: "bg-black/80", text: "text-white", border: "" },
+                          { value: "bold", label: "Bold Box", preview: "Aa", bg: "bg-yellow-400", text: "text-black font-black", border: "" },
+                          { value: "outline", label: "Outline", preview: "Aa", bg: "bg-transparent", text: "text-white font-bold", border: "border-2 border-white" },
+                          { value: "glow", label: "Neon Glow", preview: "Aa", bg: "bg-purple-600", text: "text-white font-bold", border: "shadow-[0_0_20px_rgba(168,85,247,0.8)]" },
+                        ].map((style) => (
+                          <button
+                            key={style.value}
+                            type="button"
+                            onClick={() => setCaptionStyle(style.value as "classic" | "bold" | "outline" | "glow")}
+                            disabled={isSubmitting}
+                            className={`flex flex-col items-center justify-center rounded-lg border-2 p-3 transition-all ${
+                              captionStyle === style.value
+                                ? "border-purple-500 bg-purple-500/10"
+                                : "border-zinc-800 bg-zinc-900/50 hover:border-zinc-700"
+                            }`}
+                          >
+                            <div className={`px-3 py-1 rounded ${style.bg} ${style.text} ${style.border} text-sm mb-2`}>
+                              {style.preview}
+                            </div>
+                            <span className="font-mono text-xs text-zinc-400">{style.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -408,7 +457,7 @@ export default function OpusPage() {
                 <div className="space-y-2 pt-2">
                   {PROCESSING_STEPS.map((step, idx) => {
                     const currentIdx = getCurrentStepIndex();
-                    const isActive = step === jobStatus?.currentStep;
+                    const isActive = step === jobStatus?.currentStep && jobStatus?.status !== "completed";
                     const isComplete = idx < currentIdx || jobStatus?.status === "completed";
 
                     return (
@@ -469,40 +518,47 @@ export default function OpusPage() {
                     )}
                   </div>
                 </CardHeader>
-                <CardContent className="space-y-4">
-                  {clips.map((clip) => (
-                    <div
-                      key={clip.id}
-                      className="flex items-center justify-between rounded-lg bg-zinc-950 p-4 border border-zinc-800 hover:border-zinc-700 transition-colors"
-                    >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-mono text-sm font-medium text-purple-400">
-                            Clip {clip.id}
-                          </span>
-                          <span className="font-mono text-xs text-zinc-600">
-                            {formatDuration(clip.start)} - {formatDuration(clip.end)}
-                          </span>
-                          <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">
-                            Score: {clip.score.toFixed(1)}
-                          </span>
-                        </div>
-                        {clip.text && (
-                          <p className="font-mono text-xs text-zinc-500 line-clamp-2">{clip.text}</p>
+<CardContent className="space-y-4">
+                    {clips.map((clip) => (
+                      <div
+                        key={clip.id}
+                        className="flex items-start gap-4 rounded-lg bg-zinc-950 p-4 border border-zinc-800 hover:border-zinc-700 transition-colors"
+                      >
+                        {clip.thumbnailUrl && (
+                          <img
+                            src={clip.thumbnailUrl}
+                            alt={`Clip ${clip.id} preview`}
+                            className="w-24 h-auto rounded-lg object-cover flex-shrink-0"
+                          />
                         )}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="font-mono text-sm font-medium text-purple-400">
+                              Clip {clip.id}
+                            </span>
+                            <span className="font-mono text-xs text-zinc-600">
+                              {formatDuration(clip.start)} - {formatDuration(clip.end)}
+                            </span>
+                            <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">
+                              Score: {clip.score.toFixed(1)}
+                            </span>
+                          </div>
+                          {clip.text && (
+                            <p className="font-mono text-xs text-zinc-500 line-clamp-2">{clip.text}</p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 ml-4">
+                          <a
+                            href={clip.downloadUrl}
+                            download={clip.filename}
+                            className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-purple-600 text-white hover:bg-purple-500 transition-colors"
+                          >
+                            <Download className="h-4 w-4" />
+                          </a>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2 ml-4">
-                        <a
-                          href={clip.downloadUrl}
-                          download={clip.filename}
-                          className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-purple-600 text-white hover:bg-purple-500 transition-colors"
-                        >
-                          <Download className="h-4 w-4" />
-                        </a>
-                      </div>
-                    </div>
-                  ))}
-                </CardContent>
+                    ))}
+                  </CardContent>
               </Card>
             )}
 

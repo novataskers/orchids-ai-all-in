@@ -119,13 +119,21 @@ export async function POST(request: NextRequest) {
 }
 
 async function processJobInBackground(jobId: string) {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+  const protocol = process.env.NODE_ENV === "production" ? "https" : "http";
+  const host = process.env.VERCEL_URL || process.env.NEXT_PUBLIC_APP_URL || "localhost:3000";
+  const baseUrl = host.startsWith("http") ? host : `${protocol}://${host}`;
+  
+  console.log(`[opus] Triggering background job: ${baseUrl}/api/opus/process-job for job ${jobId}`);
   
   fetch(`${baseUrl}/api/opus/process-job`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jobId }),
-  }).catch((err) => {
-    console.error("Failed to trigger background job:", err);
-  });
+  })
+    .then((res) => {
+      console.log(`[opus] Background job response: ${res.status}`);
+    })
+    .catch((err) => {
+      console.error("[opus] Failed to trigger background job:", err);
+    });
 }

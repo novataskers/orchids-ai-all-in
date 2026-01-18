@@ -198,12 +198,17 @@ async function createZip(files: string[], zipPath: string): Promise<void> {
 }
 
 export async function POST(request: NextRequest) {
-  try {
-    const { jobId } = await request.json();
+    try {
+      const body = await request.json();
+      console.log("[opus/process-job] Received body:", body);
+      const { jobId } = body;
 
-    if (!jobId) {
-      return NextResponse.json({ error: "No job ID provided" }, { status: 400 });
-    }
+      if (!jobId) {
+        console.log("[opus/process-job] No jobId in body");
+        return NextResponse.json({ error: "No job ID provided" }, { status: 400 });
+      }
+
+      console.log("[opus/process-job] Processing job:", jobId);
 
     const { data: job, error } = await supabase
       .from("opus_jobs")
@@ -240,32 +245,86 @@ export async function POST(request: NextRequest) {
 
 await updateJob(jobId, { current_step: "transcribing", progress: 30 });
 
-      const wavPath = path.join(sessionDir, "audio.wav");
-          await execFileAsync(getFfmpegPath(), [
-            "-y", "-i", audioPath, "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", wavPath
-          ]);
+        const mp3Path = path.join(sessionDir, "audio.mp3");
+        await execFileAsync(getFfmpegPath(), [
+          "-y", "-i", audioPath, "-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "32k", mp3Path
+        ]);
 
-        const audioBuffer = await readFile(wavPath);
-        const audioFile = new File([audioBuffer], "audio.wav", { type: "audio/wav" });
+        const audioBuffer = await readFile(mp3Path);
+        
+        const MAX_FILE_SIZE = 24 * 1024 * 1024;
+        let segments: TranscriptSegment[] = [];
+        
+        if (audioBuffer.length > MAX_FILE_SIZE) {
+          console.log(`[opus] Audio file too large (${(audioBuffer.length / 1024 / 1024).toFixed(1)}MB), splitting into chunks...`);
+          
+          const { stdout: durationStr } = await execFileAsync(getFfmpegPath(), [
+            "-i", mp3Path, "-f", "null", "-"
+          ]).catch(() => ({ stdout: "", stderr: "" }));
+          
+          const durationMatch = job.video_duration || 300;
+          const chunkDuration = 300;
+          const numChunks = Math.ceil(durationMatch / chunkDuration);
+          
+          for (let i = 0; i < numChunks; i++) {
+            const startTime = i * chunkDuration;
+            const chunkPath = path.join(sessionDir, `chunk_${i}.mp3`);
+            
+            await execFileAsync(getFfmpegPath(), [
+              "-y", "-i", mp3Path, "-ss", String(startTime), "-t", String(chunkDuration),
+              "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "32k", chunkPath
+            ]);
+            
+            const chunkBuffer = await readFile(chunkPath);
+            const chunkFile = new File([chunkBuffer], `chunk_${i}.mp3`, { type: "audio/mpeg" });
+            
+            const transcription = await groq.audio.transcriptions.create({
+              file: chunkFile,
+              model: "whisper-large-v3-turbo",
+              response_format: "verbose_json",
+              timestamp_granularities: ["segment"],
+            });
+            
+            const chunkSegments: TranscriptSegment[] = (transcription.segments || []).map((seg, idx) => ({
+              id: segments.length + idx,
+              start: seg.start + startTime,
+              end: seg.end + startTime,
+              text: seg.text.trim(),
+            }));
+            
+            segments = [...segments, ...chunkSegments];
+            
+            try { await unlink(chunkPath); } catch {}
+            
+            const transcribeProgress = 30 + Math.floor((i + 1) / numChunks * 15);
+            await updateJob(jobId, { progress: transcribeProgress });
+          }
+        } else {
+          const audioFile = new File([audioBuffer], "audio.mp3", { type: "audio/mpeg" });
 
-        const transcription = await groq.audio.transcriptions.create({
-          file: audioFile,
-          model: "whisper-large-v3-turbo",
-          response_format: "verbose_json",
-          timestamp_granularities: ["segment"],
-        });
+          const transcription = await groq.audio.transcriptions.create({
+            file: audioFile,
+            model: "whisper-large-v3-turbo",
+            response_format: "verbose_json",
+            timestamp_granularities: ["segment"],
+          });
 
-        const segments: TranscriptSegment[] = (transcription.segments || []).map((seg, idx) => ({
-          id: idx,
-          start: seg.start,
-          end: seg.end,
-          text: seg.text.trim(),
-        }));
+          segments = (transcription.segments || []).map((seg, idx) => ({
+            id: idx,
+            start: seg.start,
+            end: seg.end,
+            text: seg.text.trim(),
+          }));
+        }
+        
+        const fullText = segments.map(s => s.text).join(" ");
+        
+        try { await unlink(mp3Path); } catch {}
 
       await updateJob(jobId, { 
         current_step: "finding_clips", 
         progress: 50,
-        transcription: { text: transcription.text, segments }
+        transcription: { text: fullText, segments }
       });
 
       const engagingClips = findEngagingClips(segments, job.clip_duration, job.max_clips);
@@ -289,37 +348,61 @@ await updateJob(jobId, { current_step: "transcribing", progress: 30 });
 
       await updateJob(jobId, { current_step: "cutting_clips", progress: 70 });
 
-      const generatedClips: Array<{
-        id: number;
-        filename: string;
-        downloadUrl: string;
-        start: number;
-        end: number;
-        duration: number;
-        text: string;
-        score: number;
-      }> = [];
+const generatedClips: Array<{
+          id: number;
+          filename: string;
+          downloadUrl: string;
+          thumbnailUrl: string;
+          start: number;
+          end: number;
+          duration: number;
+          text: string;
+          score: number;
+        }> = [];
 
-      for (let i = 0; i < engagingClips.length; i++) {
-        const clip = engagingClips[i];
-        const filename = `clip_${clip.id}_${Math.floor(clip.start)}s.mp4`;
-        const outputPath = path.join(sessionDir, filename);
+        const aspectRatio = job.aspect_ratio || "9:16";
+        let scaleFilter = "";
+        if (aspectRatio === "9:16") {
+          scaleFilter = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1";
+        } else if (aspectRatio === "16:9") {
+          scaleFilter = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1";
+        }
 
-await execFileAsync(getFfmpegPath(), [
-              "-y", "-ss", formatTime(clip.start), "-i", videoPath, "-t", String(clip.duration),
-              "-c", "copy", "-avoid_negative_ts", "1", outputPath
-            ]);
+        for (let i = 0; i < engagingClips.length; i++) {
+          const clip = engagingClips[i];
+          const filename = `clip_${clip.id}_${Math.floor(clip.start)}s.mp4`;
+          const outputPath = path.join(sessionDir, filename);
+          const thumbFilename = `thumb_${clip.id}.jpg`;
+          const thumbPath = path.join(sessionDir, thumbFilename);
 
-        generatedClips.push({
-          id: clip.id,
-          filename,
-          downloadUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(filename)}`,
-          start: clip.start,
-          end: clip.end,
-          duration: clip.duration,
-          text: clip.text,
-          score: clip.score,
-        });
+          const ffmpegArgs = [
+            "-y", "-ss", formatTime(clip.start), "-i", videoPath, "-t", String(clip.duration),
+            "-vf", scaleFilter,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            outputPath
+          ];
+
+          await execFileAsync(getFfmpegPath(), ffmpegArgs);
+
+          await execFileAsync(getFfmpegPath(), [
+            "-y", "-ss", formatTime(clip.start + clip.duration / 2), "-i", videoPath,
+            "-vframes", "1", "-vf", scaleFilter + ",scale=320:-1",
+            "-q:v", "5", thumbPath
+          ]);
+
+          generatedClips.push({
+            id: clip.id,
+            filename,
+            downloadUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(filename)}`,
+            thumbnailUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(thumbFilename)}`,
+            start: clip.start,
+            end: clip.end,
+            duration: clip.duration,
+            text: clip.text,
+            score: clip.score,
+          });
 
         const clipProgress = 70 + Math.floor((i + 1) / engagingClips.length * 25);
         await updateJob(jobId, { progress: clipProgress });
@@ -341,10 +424,9 @@ await execFileAsync(getFfmpegPath(), [
       });
 
       try {
-        await unlink(audioPath);
-        await unlink(wavPath);
-        await unlink(videoPath);
-      } catch {}
+          await unlink(audioPath);
+          await unlink(videoPath);
+        } catch {}
 
       return NextResponse.json({ success: true, jobId });
 
