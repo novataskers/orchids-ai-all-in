@@ -223,6 +223,15 @@ export default function OpusPage() {
 
         {!jobId && (
           <>
+            {process.env.NEXT_PUBLIC_VERCEL_URL && (
+              <div className="mb-6 rounded-lg bg-amber-500/10 border border-amber-500/30 p-4">
+                <p className="font-mono text-sm text-amber-400">
+                  <AlertCircle className="inline w-4 h-4 mr-2" />
+                  Video processing requires ffmpeg and is only available when running locally. 
+                  Deployed versions cannot process videos.
+                </p>
+              </div>
+            )}
             <Card className="border-zinc-800 bg-zinc-900/50 backdrop-blur-sm mb-6">
               <CardContent className="pt-6 space-y-4">
                 <div className="space-y-2">

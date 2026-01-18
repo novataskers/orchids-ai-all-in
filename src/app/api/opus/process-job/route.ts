@@ -4,7 +4,7 @@ import YTDlpWrap from "yt-dlp-wrap";
 import Groq from "groq-sdk";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { mkdir, unlink, readFile } from "fs/promises";
+import { mkdir, unlink, readFile, writeFile } from "fs/promises";
 import { existsSync, createWriteStream } from "fs";
 import path from "path";
 import archiver from "archiver";
@@ -197,8 +197,77 @@ async function createZip(files: string[], zipPath: string): Promise<void> {
   });
 }
 
+function getCaptionStyle(style: string, aspectRatio: string): string {
+  const isVertical = aspectRatio === "9:16";
+  const fontSize = isVertical ? 48 : 36;
+  const yPos = isVertical ? "(h-text_h)/2+300" : "(h-text_h)-100";
+  
+  const styles: Record<string, string> = {
+    classic: `fontsize=${fontSize}:fontcolor=white:borderw=2:bordercolor=black:x=(w-text_w)/2:y=${yPos}`,
+    bold: `fontsize=${fontSize + 8}:fontcolor=black:box=1:boxcolor=yellow@0.9:boxborderw=8:x=(w-text_w)/2:y=${yPos}`,
+    outline: `fontsize=${fontSize}:fontcolor=white:borderw=4:bordercolor=black:x=(w-text_w)/2:y=${yPos}`,
+    glow: `fontsize=${fontSize}:fontcolor=white:shadowcolor=purple@0.8:shadowx=0:shadowy=0:borderw=3:bordercolor=purple:x=(w-text_w)/2:y=${yPos}`,
+  };
+  
+  return styles[style] || styles.classic;
+}
+
+function getCaptionStyleASS(style: string, aspectRatio: string): string {
+  const isVertical = aspectRatio === "9:16";
+  const fontSize = isVertical ? 24 : 18;
+  const marginV = isVertical ? 400 : 60;
+  
+  const styles: Record<string, string> = {
+    classic: `FontSize=${fontSize},PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=${marginV},Alignment=2`,
+    bold: `FontSize=${fontSize + 4},PrimaryColour=&H000000,BackColour=&H00FFFF,BorderStyle=3,Outline=0,Shadow=0,MarginV=${marginV},Alignment=2,Bold=1`,
+    outline: `FontSize=${fontSize},PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=4,Shadow=0,MarginV=${marginV},Alignment=2,Bold=1`,
+    glow: `FontSize=${fontSize},PrimaryColour=&HFFFFFF,OutlineColour=&HFF00FF,BorderStyle=1,Outline=3,Shadow=2,ShadowColour=&HFF00FF,MarginV=${marginV},Alignment=2,Bold=1`,
+  };
+  
+  return styles[style] || styles.classic;
+}
+
+function generateSRT(segments: TranscriptSegment[], clipStart: number, clipEnd: number): string {
+  let srtContent = "";
+  let index = 1;
+  
+  const clipSegments = segments.filter(seg => 
+    seg.start >= clipStart && seg.end <= clipEnd + 1
+  );
+  
+  for (const seg of clipSegments) {
+    const relStart = Math.max(0, seg.start - clipStart);
+    const relEnd = Math.min(clipEnd - clipStart, seg.end - clipStart);
+    
+    const startTime = formatSRTTime(relStart);
+    const endTime = formatSRTTime(relEnd);
+    
+    srtContent += `${index}\n`;
+    srtContent += `${startTime} --> ${endTime}\n`;
+    srtContent += `${seg.text}\n\n`;
+    index++;
+  }
+  
+  return srtContent;
+}
+
+function formatSRTTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")},${ms.toString().padStart(3, "0")}`;
+}
+
 export async function POST(request: NextRequest) {
     try {
+      if (process.env.VERCEL === "1") {
+        return NextResponse.json(
+          { error: "Video processing is not supported on Vercel. This feature requires ffmpeg and yt-dlp which are not available in serverless environments. Please run locally or use a dedicated server." },
+          { status: 503 }
+        );
+      }
+      
       const body = await request.json();
       console.log("[opus/process-job] Received body:", body);
       const { jobId } = body;
@@ -337,76 +406,96 @@ await updateJob(jobId, { current_step: "transcribing", progress: 30 });
 
       const videoPath = path.join(sessionDir, "video.mp4");
       
-      await ytdlp.execPromise([
-        youtubeUrl,
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "-o", videoPath,
-        "--no-playlist",
-        "--no-warnings",
-        "--merge-output-format", "mp4"
-      ]);
+await ytdlp.execPromise([
+          youtubeUrl,
+          "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best",
+          "-o", videoPath,
+          "--no-playlist",
+          "--no-warnings",
+          "--merge-output-format", "mp4"
+        ]);
 
-      await updateJob(jobId, { current_step: "cutting_clips", progress: 70 });
+await updateJob(jobId, { current_step: "cutting_clips", progress: 70 });
 
 const generatedClips: Array<{
-          id: number;
-          filename: string;
-          downloadUrl: string;
-          thumbnailUrl: string;
-          start: number;
-          end: number;
-          duration: number;
-          text: string;
-          score: number;
-        }> = [];
+            id: number;
+            filename: string;
+            downloadUrl: string;
+            thumbnailUrl: string;
+            start: number;
+            end: number;
+            duration: number;
+            text: string;
+            score: number;
+          }> = [];
 
-        const aspectRatio = job.aspect_ratio || "9:16";
-        let scaleFilter = "";
-        if (aspectRatio === "9:16") {
-          scaleFilter = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1";
-        } else if (aspectRatio === "16:9") {
-          scaleFilter = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1";
+          const aspectRatio = job.aspect_ratio || "9:16";
+          const addCaptions = job.add_captions !== false;
+          const captionStyle = job.caption_style || "bold";
+          
+          let scaleFilter = "";
+          let videoWidth = 1080;
+          let videoHeight = 1920;
+          if (aspectRatio === "9:16") {
+            scaleFilter = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1";
+            videoWidth = 1080;
+            videoHeight = 1920;
+          } else if (aspectRatio === "16:9") {
+            scaleFilter = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1";
+            videoWidth = 1920;
+            videoHeight = 1080;
+          }
+
+          for (let i = 0; i < engagingClips.length; i++) {
+            const clip = engagingClips[i];
+            const filename = `clip_${clip.id}_${Math.floor(clip.start)}s.mp4`;
+            const outputPath = path.join(sessionDir, filename);
+            const thumbFilename = `thumb_${clip.id}.jpg`;
+            const thumbPath = path.join(sessionDir, thumbFilename);
+
+            let videoFilter = scaleFilter;
+            
+            if (addCaptions && segments.length > 0) {
+              const srtPath = path.join(sessionDir, `clip_${clip.id}.srt`);
+              const srtContent = generateSRT(segments, clip.start, clip.end);
+              await writeFile(srtPath, srtContent, "utf-8");
+              
+              const escapedSrtPath = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+              videoFilter = `${scaleFilter},subtitles='${escapedSrtPath}':force_style='${getCaptionStyleASS(captionStyle, aspectRatio)}'`;
+            }
+
+            const ffmpegArgs = [
+              "-y", "-ss", formatTime(clip.start), "-i", videoPath, "-t", String(clip.duration),
+              "-vf", videoFilter,
+              "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+              "-c:a", "aac", "-b:a", "128k",
+              "-movflags", "+faststart",
+              outputPath
+            ];
+
+            await execFileAsync(getFfmpegPath(), ffmpegArgs);
+
+            await execFileAsync(getFfmpegPath(), [
+              "-y", "-ss", formatTime(clip.start + clip.duration / 2), "-i", videoPath,
+              "-vframes", "1", "-vf", scaleFilter + ",scale=320:-1",
+              "-q:v", "5", thumbPath
+            ]);
+
+            generatedClips.push({
+              id: clip.id,
+              filename,
+              downloadUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(filename)}`,
+              thumbnailUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(thumbFilename)}`,
+              start: clip.start,
+              end: clip.end,
+              duration: clip.duration,
+              text: clip.text,
+              score: clip.score,
+            });
+
+          const clipProgress = 70 + Math.floor((i + 1) / engagingClips.length * 25);
+          await updateJob(jobId, { progress: clipProgress });
         }
-
-        for (let i = 0; i < engagingClips.length; i++) {
-          const clip = engagingClips[i];
-          const filename = `clip_${clip.id}_${Math.floor(clip.start)}s.mp4`;
-          const outputPath = path.join(sessionDir, filename);
-          const thumbFilename = `thumb_${clip.id}.jpg`;
-          const thumbPath = path.join(sessionDir, thumbFilename);
-
-          const ffmpegArgs = [
-            "-y", "-ss", formatTime(clip.start), "-i", videoPath, "-t", String(clip.duration),
-            "-vf", scaleFilter,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            outputPath
-          ];
-
-          await execFileAsync(getFfmpegPath(), ffmpegArgs);
-
-          await execFileAsync(getFfmpegPath(), [
-            "-y", "-ss", formatTime(clip.start + clip.duration / 2), "-i", videoPath,
-            "-vframes", "1", "-vf", scaleFilter + ",scale=320:-1",
-            "-q:v", "5", thumbPath
-          ]);
-
-          generatedClips.push({
-            id: clip.id,
-            filename,
-            downloadUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(filename)}`,
-            thumbnailUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(thumbFilename)}`,
-            start: clip.start,
-            end: clip.end,
-            duration: clip.duration,
-            text: clip.text,
-            score: clip.score,
-          });
-
-        const clipProgress = 70 + Math.floor((i + 1) / engagingClips.length * 25);
-        await updateJob(jobId, { progress: clipProgress });
-      }
 
       const clipFiles = generatedClips.map((c) => path.join(sessionDir, c.filename));
       const zipFilename = `clips_${jobId.slice(0, 8)}.zip`;

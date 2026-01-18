@@ -41,13 +41,14 @@ function extractVideoId(url: string): string | null {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { 
-      url, 
-      clipDuration = 60, 
-      maxClips = 5, 
-      aspectRatio = "9:16",
-      addCaptions = true 
-    } = body;
+const { 
+        url, 
+        clipDuration = 60, 
+        maxClips = 5, 
+        aspectRatio = "9:16",
+        addCaptions = true,
+        captionStyle = "bold"
+      } = body;
 
     if (!url) {
       return NextResponse.json({ error: "No YouTube URL provided" }, { status: 400 });
@@ -74,24 +75,25 @@ export async function POST(request: NextRequest) {
       console.warn("Could not fetch video info, using defaults:", e);
     }
 
-    const { data: job, error } = await supabase
-      .from("opus_jobs")
-      .insert({
-        youtube_url: youtubeUrl,
-        video_id: videoId,
-        video_title: title,
-        video_duration: duration,
-        thumbnail_url: thumbnail,
-        status: "processing",
-        current_step: "queued",
-        progress: 5,
-        clip_duration: clipDuration,
-        max_clips: maxClips,
-        aspect_ratio: aspectRatio,
-        add_captions: addCaptions,
-      })
-      .select()
-      .single();
+const { data: job, error } = await supabase
+        .from("opus_jobs")
+        .insert({
+          youtube_url: youtubeUrl,
+          video_id: videoId,
+          video_title: title,
+          video_duration: duration,
+          thumbnail_url: thumbnail,
+          status: "processing",
+          current_step: "queued",
+          progress: 5,
+          clip_duration: clipDuration,
+          max_clips: maxClips,
+          aspect_ratio: aspectRatio,
+          add_captions: addCaptions,
+          caption_style: captionStyle,
+        })
+        .select()
+        .single();
 
     if (error) {
       throw new Error(`Database error: ${error.message}`);
@@ -125,15 +127,23 @@ async function processJobInBackground(jobId: string) {
   
   console.log(`[opus] Triggering background job: ${baseUrl}/api/opus/process-job for job ${jobId}`);
   
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  
   fetch(`${baseUrl}/api/opus/process-job`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jobId }),
+    signal: controller.signal,
   })
     .then((res) => {
+      clearTimeout(timeout);
       console.log(`[opus] Background job response: ${res.status}`);
     })
     .catch((err) => {
-      console.error("[opus] Failed to trigger background job:", err);
+      clearTimeout(timeout);
+      if (err.name !== "AbortError") {
+        console.error("[opus] Failed to trigger background job:", err);
+      }
     });
 }
