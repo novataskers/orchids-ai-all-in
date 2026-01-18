@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: orchids-ai-all-in
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+    buildFilter:
+      paths:
+        - "**/*"
+    plan: free

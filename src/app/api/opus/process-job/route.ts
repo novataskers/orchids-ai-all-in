@@ -32,9 +32,10 @@ const groq = new Groq({
 });
 
 const isProduction = process.env.NODE_ENV === "production";
+const isRailway = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RENDER;
 const TMP_BASE = isProduction ? "/tmp" : path.join(process.cwd(), "tmp");
 const BIN_DIR = isProduction ? "/tmp/bin" : path.join(process.cwd(), "bin");
-const YTDLP_PATH = isProduction ? "/tmp/bin/yt-dlp" : path.join(BIN_DIR, "yt-dlp.exe");
+const YTDLP_PATH = isRailway ? "yt-dlp" : (isProduction ? "/tmp/bin/yt-dlp" : path.join(BIN_DIR, "yt-dlp.exe"));
 
 async function ensureDir(dir: string) {
   if (!existsSync(dir)) {
@@ -43,6 +44,10 @@ async function ensureDir(dir: string) {
 }
 
 async function ensureYtdlp(): Promise<YTDlpWrap> {
+  if (isRailway) {
+    return new YTDlpWrap("yt-dlp");
+  }
+  
   await ensureDir(BIN_DIR);
   
   if (!existsSync(YTDLP_PATH)) {
@@ -261,9 +266,9 @@ function formatSRTTime(seconds: number): string {
 
 export async function POST(request: NextRequest) {
     try {
-      if (process.env.VERCEL === "1") {
+      if (process.env.VERCEL === "1" && !process.env.RAILWAY_ENVIRONMENT && !process.env.RENDER) {
         return NextResponse.json(
-          { error: "Video processing is not supported on Vercel. This feature requires ffmpeg and yt-dlp which are not available in serverless environments. Please run locally or use a dedicated server." },
+          { error: "Video processing is not supported on Vercel. Please deploy to Railway or run locally." },
           { status: 503 }
         );
       }
