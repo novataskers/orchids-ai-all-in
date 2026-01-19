@@ -58,3 +58,6 @@ check-*.js
 $null
 test_prompt.json
 bin/
+gen-lock.cjs
+*.tsbuildinfo
+package-lock.json

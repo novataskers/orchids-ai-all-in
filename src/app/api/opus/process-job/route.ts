@@ -1,61 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import YTDlpWrap from "yt-dlp-wrap";
 import Groq from "groq-sdk";
-import { execFile } from "child_process";
-import { promisify } from "util";
-import { mkdir, unlink, readFile, writeFile } from "fs/promises";
-import { existsSync, createWriteStream } from "fs";
-import path from "path";
-import archiver from "archiver";
-
-const execFileAsync = promisify(execFile);
-
-function getFfmpegPath(): string {
-  if (process.env.NODE_ENV === "production") {
-    return "ffmpeg";
-  }
-  const wingetPath = "C:\\Users\\jihan\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.0.1-full_build\\bin\\ffmpeg.exe";
-  if (existsSync(wingetPath)) {
-    return wingetPath;
-  }
-  return "ffmpeg";
-}
+import { YtDlp } from "ytdlp-nodejs";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-const isProduction = process.env.NODE_ENV === "production";
-const isRailway = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RENDER;
-const TMP_BASE = isProduction ? "/tmp" : path.join(process.cwd(), "tmp");
-const BIN_DIR = isProduction ? "/tmp/bin" : path.join(process.cwd(), "bin");
-const YTDLP_PATH = isRailway ? "yt-dlp" : (isProduction ? "/tmp/bin/yt-dlp" : path.join(BIN_DIR, "yt-dlp.exe"));
-
-async function ensureDir(dir: string) {
-  if (!existsSync(dir)) {
-    await mkdir(dir, { recursive: true });
-  }
-}
-
-async function ensureYtdlp(): Promise<YTDlpWrap> {
-  if (isRailway) {
-    return new YTDlpWrap("yt-dlp");
-  }
-  
-  await ensureDir(BIN_DIR);
-  
-  if (!existsSync(YTDLP_PATH)) {
-    await YTDlpWrap.downloadFromGithub(YTDLP_PATH);
-  }
-  
-  return new YTDlpWrap(YTDLP_PATH);
-}
+const ytdlp = new YtDlp();
 
 async function updateJob(jobId: string, updates: Record<string, unknown>) {
   await supabase
@@ -176,113 +134,184 @@ function findEngagingClips(
   }));
 }
 
-function formatTime(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 100);
-  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
-}
-
-async function createZip(files: string[], zipPath: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const output = createWriteStream(zipPath);
-    const archive = archiver("zip", { zlib: { level: 9 } });
-
-    output.on("close", () => resolve());
-    archive.on("error", (err) => reject(err));
-
-    archive.pipe(output);
-
-    for (const file of files) {
-      archive.file(file, { name: path.basename(file) });
+async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
+  console.log(`[opus] Downloading audio for video: ${videoId}`);
+  
+  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const tempDir = os.tmpdir();
+  const outputPath = path.join(tempDir, `opus_${videoId}_${Date.now()}.mp3`);
+  
+  try {
+    console.log(`[opus] Using yt-dlp to download audio...`);
+    
+    await ytdlp.downloadAsync(youtubeUrl, {
+      format: { filter: "audioonly", quality: "highest" },
+      output: outputPath,
+      extractAudio: true,
+      audioFormat: "mp3",
+      onProgress: (progress: { percent?: number }) => {
+        if (progress.percent) {
+          console.log(`[opus] Download progress: ${progress.percent.toFixed(1)}%`);
+        }
+      },
+    });
+    
+    if (!fs.existsSync(outputPath)) {
+      const files = fs.readdirSync(tempDir).filter(f => f.startsWith(`opus_${videoId}`));
+      if (files.length > 0) {
+        const actualPath = path.join(tempDir, files[0]);
+        const audioBuffer = fs.readFileSync(actualPath);
+        fs.unlinkSync(actualPath);
+        console.log(`[opus] Downloaded audio: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+        return audioBuffer;
+      }
+      throw new Error("Download completed but file not found");
     }
-
-    archive.finalize();
-  });
-}
-
-function getCaptionStyle(style: string, aspectRatio: string): string {
-  const isVertical = aspectRatio === "9:16";
-  const fontSize = isVertical ? 48 : 36;
-  const yPos = isVertical ? "(h-text_h)/2+300" : "(h-text_h)-100";
-  
-  const styles: Record<string, string> = {
-    classic: `fontsize=${fontSize}:fontcolor=white:borderw=2:bordercolor=black:x=(w-text_w)/2:y=${yPos}`,
-    bold: `fontsize=${fontSize + 8}:fontcolor=black:box=1:boxcolor=yellow@0.9:boxborderw=8:x=(w-text_w)/2:y=${yPos}`,
-    outline: `fontsize=${fontSize}:fontcolor=white:borderw=4:bordercolor=black:x=(w-text_w)/2:y=${yPos}`,
-    glow: `fontsize=${fontSize}:fontcolor=white:shadowcolor=purple@0.8:shadowx=0:shadowy=0:borderw=3:bordercolor=purple:x=(w-text_w)/2:y=${yPos}`,
-  };
-  
-  return styles[style] || styles.classic;
-}
-
-function getCaptionStyleASS(style: string, aspectRatio: string): string {
-  const isVertical = aspectRatio === "9:16";
-  const fontSize = isVertical ? 24 : 18;
-  const marginV = isVertical ? 400 : 60;
-  
-  const styles: Record<string, string> = {
-    classic: `FontSize=${fontSize},PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=${marginV},Alignment=2`,
-    bold: `FontSize=${fontSize + 4},PrimaryColour=&H000000,BackColour=&H00FFFF,BorderStyle=3,Outline=0,Shadow=0,MarginV=${marginV},Alignment=2,Bold=1`,
-    outline: `FontSize=${fontSize},PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=1,Outline=4,Shadow=0,MarginV=${marginV},Alignment=2,Bold=1`,
-    glow: `FontSize=${fontSize},PrimaryColour=&HFFFFFF,OutlineColour=&HFF00FF,BorderStyle=1,Outline=3,Shadow=2,ShadowColour=&HFF00FF,MarginV=${marginV},Alignment=2,Bold=1`,
-  };
-  
-  return styles[style] || styles.classic;
-}
-
-function generateSRT(segments: TranscriptSegment[], clipStart: number, clipEnd: number): string {
-  let srtContent = "";
-  let index = 1;
-  
-  const clipSegments = segments.filter(seg => 
-    seg.start >= clipStart && seg.end <= clipEnd + 1
-  );
-  
-  for (const seg of clipSegments) {
-    const relStart = Math.max(0, seg.start - clipStart);
-    const relEnd = Math.min(clipEnd - clipStart, seg.end - clipStart);
     
-    const startTime = formatSRTTime(relStart);
-    const endTime = formatSRTTime(relEnd);
+    const audioBuffer = fs.readFileSync(outputPath);
+    fs.unlinkSync(outputPath);
     
-    srtContent += `${index}\n`;
-    srtContent += `${startTime} --> ${endTime}\n`;
-    srtContent += `${seg.text}\n\n`;
-    index++;
+    if (audioBuffer.length < 10000) {
+      throw new Error(`Downloaded file too small (${audioBuffer.length} bytes)`);
+    }
+    
+    console.log(`[opus] Downloaded audio via yt-dlp: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+    return audioBuffer;
+    
+  } catch (ytdlpError) {
+    console.log(`[opus] yt-dlp failed: ${ytdlpError instanceof Error ? ytdlpError.message : String(ytdlpError)}`);
+    
+    if (fs.existsSync(outputPath)) {
+      try { fs.unlinkSync(outputPath); } catch {}
+    }
+    
+    console.log(`[opus] Trying fallback RapidAPI...`);
+    const rapidApiKey = process.env.RAPIDAPI_KEY;
+    
+    if (rapidApiKey) {
+      try {
+        const response = await fetch(`https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`, {
+          headers: {
+            "x-rapidapi-host": "youtube-mp36.p.rapidapi.com",
+            "x-rapidapi-key": rapidApiKey,
+          },
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          
+          if (data.status === "processing") {
+            console.log(`[opus] RapidAPI processing, polling...`);
+            for (let i = 0; i < 15; i++) {
+              await new Promise(r => setTimeout(r, 4000));
+              const retryRes = await fetch(`https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`, {
+                headers: { "x-rapidapi-host": "youtube-mp36.p.rapidapi.com", "x-rapidapi-key": rapidApiKey }
+              });
+              const retryData = await retryRes.json();
+              if (retryData.status === "ok" && retryData.link) {
+                const audioRes = await fetch(retryData.link);
+                if (audioRes.ok) {
+                  const buf = Buffer.from(await audioRes.arrayBuffer());
+                  if (buf.length > 10000) {
+                    console.log(`[opus] Downloaded via RapidAPI fallback: ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
+                    return buf;
+                  }
+                }
+              }
+              if (retryData.status === "fail") break;
+            }
+          }
+          
+          if (data.status === "ok" && data.link) {
+            const audioRes = await fetch(data.link);
+            if (audioRes.ok) {
+              const buf = Buffer.from(await audioRes.arrayBuffer());
+              if (buf.length > 10000) {
+                console.log(`[opus] Downloaded via RapidAPI fallback: ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
+                return buf;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`[opus] RapidAPI fallback also failed: ${e}`);
+      }
+    }
+    
+    throw new Error(`Failed to download audio: ${ytdlpError instanceof Error ? ytdlpError.message : String(ytdlpError)}`);
+  }
+}
+
+async function transcribeWithWhisper(audioBuffer: Buffer): Promise<TranscriptSegment[]> {
+  console.log(`[opus] Transcribing audio with Groq Whisper...`);
+  
+  const maxSize = 25 * 1024 * 1024;
+  let bufferToTranscribe = audioBuffer;
+  
+  if (audioBuffer.length > maxSize) {
+    console.log(`[opus] Audio too large (${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB), truncating to 25MB`);
+    bufferToTranscribe = audioBuffer.slice(0, maxSize);
   }
   
-  return srtContent;
-}
-
-function formatSRTTime(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 1000);
-  return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")},${ms.toString().padStart(3, "0")}`;
+  const file = new File([bufferToTranscribe], "audio.mp3", { type: "audio/mpeg" });
+  
+  const transcription = await groq.audio.transcriptions.create({
+    file: file,
+    model: "whisper-large-v3-turbo",
+    response_format: "verbose_json",
+    language: "en",
+  });
+  
+  console.log(`[opus] Transcription complete`);
+  
+  type WhisperSegment = {
+    start: number;
+    end: number;
+    text: string;
+  };
+  
+  const segments: TranscriptSegment[] = [];
+  
+  if (transcription.segments && Array.isArray(transcription.segments)) {
+    (transcription.segments as WhisperSegment[]).forEach((seg, idx) => {
+      segments.push({
+        id: idx,
+        start: seg.start,
+        end: seg.end,
+        text: seg.text.trim(),
+      });
+    });
+  } else if (transcription.text) {
+    const words = transcription.text.split(/\s+/);
+    const wordsPerSegment = 20;
+    const estimatedDuration = 300;
+    const segmentDuration = estimatedDuration / Math.ceil(words.length / wordsPerSegment);
+    
+    for (let i = 0; i < words.length; i += wordsPerSegment) {
+      const segmentWords = words.slice(i, i + wordsPerSegment);
+      const segmentIndex = Math.floor(i / wordsPerSegment);
+      segments.push({
+        id: segmentIndex,
+        start: segmentIndex * segmentDuration,
+        end: (segmentIndex + 1) * segmentDuration,
+        text: segmentWords.join(" "),
+      });
+    }
+  }
+  
+  return segments;
 }
 
 export async function POST(request: NextRequest) {
-    try {
-      if (process.env.VERCEL === "1" && !process.env.RAILWAY_ENVIRONMENT && !process.env.RENDER) {
-        return NextResponse.json(
-          { error: "Video processing is not supported on Vercel. Please deploy to Railway or run locally." },
-          { status: 503 }
-        );
-      }
-      
-      const body = await request.json();
-      console.log("[opus/process-job] Received body:", body);
-      const { jobId } = body;
+  try {
+    const body = await request.json();
+    const { jobId } = body;
 
-      if (!jobId) {
-        console.log("[opus/process-job] No jobId in body");
-        return NextResponse.json({ error: "No job ID provided" }, { status: 400 });
-      }
+    if (!jobId) {
+      return NextResponse.json({ error: "No job ID provided" }, { status: 400 });
+    }
 
-      console.log("[opus/process-job] Processing job:", jobId);
+    console.log("[opus/process-job] Processing job:", jobId);
 
     const { data: job, error } = await supabase
       .from("opus_jobs")
@@ -294,110 +323,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    const sessionDir = path.join(TMP_BASE, "opus-jobs", jobId);
-    await ensureDir(sessionDir);
-
     try {
-      await updateJob(jobId, { current_step: "downloading_audio", progress: 10 });
-
-      const ytdlp = await ensureYtdlp();
-      const youtubeUrl = job.youtube_url;
-
-      if (!youtubeUrl) {
-        throw new Error("No YouTube URL found for this job");
+      const videoId = job.video_id;
+      if (!videoId) {
+        throw new Error("No video ID found for this job");
       }
 
-      const audioPath = path.join(sessionDir, "audio.m4a");
+      await updateJob(jobId, { status: "processing", current_step: "downloading_audio", progress: 10 });
+
+      const audioBuffer = await downloadYouTubeAudio(videoId);
+
+      await updateJob(jobId, { current_step: "transcribing", progress: 30 });
       
-      await ytdlp.execPromise([
-        youtubeUrl,
-        "-f", "bestaudio[ext=m4a]/bestaudio",
-        "-o", audioPath,
-        "--no-playlist",
-        "--no-warnings"
-      ]);
+      const segments = await transcribeWithWhisper(audioBuffer);
+      const fullText = segments.map(s => s.text).join(" ");
 
-await updateJob(jobId, { current_step: "transcribing", progress: 30 });
-
-        const mp3Path = path.join(sessionDir, "audio.mp3");
-        await execFileAsync(getFfmpegPath(), [
-          "-y", "-i", audioPath, "-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "32k", mp3Path
-        ]);
-
-        const audioBuffer = await readFile(mp3Path);
-        
-        const MAX_FILE_SIZE = 24 * 1024 * 1024;
-        let segments: TranscriptSegment[] = [];
-        
-        if (audioBuffer.length > MAX_FILE_SIZE) {
-          console.log(`[opus] Audio file too large (${(audioBuffer.length / 1024 / 1024).toFixed(1)}MB), splitting into chunks...`);
-          
-          const { stdout: durationStr } = await execFileAsync(getFfmpegPath(), [
-            "-i", mp3Path, "-f", "null", "-"
-          ]).catch(() => ({ stdout: "", stderr: "" }));
-          
-          const durationMatch = job.video_duration || 300;
-          const chunkDuration = 300;
-          const numChunks = Math.ceil(durationMatch / chunkDuration);
-          
-          for (let i = 0; i < numChunks; i++) {
-            const startTime = i * chunkDuration;
-            const chunkPath = path.join(sessionDir, `chunk_${i}.mp3`);
-            
-            await execFileAsync(getFfmpegPath(), [
-              "-y", "-i", mp3Path, "-ss", String(startTime), "-t", String(chunkDuration),
-              "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "32k", chunkPath
-            ]);
-            
-            const chunkBuffer = await readFile(chunkPath);
-            const chunkFile = new File([chunkBuffer], `chunk_${i}.mp3`, { type: "audio/mpeg" });
-            
-            const transcription = await groq.audio.transcriptions.create({
-              file: chunkFile,
-              model: "whisper-large-v3-turbo",
-              response_format: "verbose_json",
-              timestamp_granularities: ["segment"],
-            });
-            
-            const chunkSegments: TranscriptSegment[] = (transcription.segments || []).map((seg, idx) => ({
-              id: segments.length + idx,
-              start: seg.start + startTime,
-              end: seg.end + startTime,
-              text: seg.text.trim(),
-            }));
-            
-            segments = [...segments, ...chunkSegments];
-            
-            try { await unlink(chunkPath); } catch {}
-            
-            const transcribeProgress = 30 + Math.floor((i + 1) / numChunks * 15);
-            await updateJob(jobId, { progress: transcribeProgress });
-          }
-        } else {
-          const audioFile = new File([audioBuffer], "audio.mp3", { type: "audio/mpeg" });
-
-          const transcription = await groq.audio.transcriptions.create({
-            file: audioFile,
-            model: "whisper-large-v3-turbo",
-            response_format: "verbose_json",
-            timestamp_granularities: ["segment"],
-          });
-
-          segments = (transcription.segments || []).map((seg, idx) => ({
-            id: idx,
-            start: seg.start,
-            end: seg.end,
-            text: seg.text.trim(),
-          }));
-        }
-        
-        const fullText = segments.map(s => s.text).join(" ");
-        
-        try { await unlink(mp3Path); } catch {}
+      console.log(`[opus] Got ${segments.length} transcript segments`);
 
       await updateJob(jobId, { 
         current_step: "finding_clips", 
-        progress: 50,
+        progress: 60,
         transcription: { text: fullText, segments }
       });
 
@@ -407,105 +352,27 @@ await updateJob(jobId, { current_step: "transcribing", progress: 30 });
         throw new Error("Could not find suitable clips in the video");
       }
 
-      await updateJob(jobId, { current_step: "downloading_video", progress: 60 });
+      console.log(`[opus] Found ${engagingClips.length} engaging clips`);
 
-      const videoPath = path.join(sessionDir, "video.mp4");
-      
-await ytdlp.execPromise([
-          youtubeUrl,
-          "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best",
-          "-o", videoPath,
-          "--no-playlist",
-          "--no-warnings",
-          "--merge-output-format", "mp4"
-        ]);
+      await updateJob(jobId, { current_step: "generating_clips", progress: 80 });
 
-await updateJob(jobId, { current_step: "cutting_clips", progress: 70 });
-
-const generatedClips: Array<{
-            id: number;
-            filename: string;
-            downloadUrl: string;
-            thumbnailUrl: string;
-            start: number;
-            end: number;
-            duration: number;
-            text: string;
-            score: number;
-          }> = [];
-
-          const aspectRatio = job.aspect_ratio || "9:16";
-          const addCaptions = job.add_captions !== false;
-          const captionStyle = job.caption_style || "bold";
-          
-          let scaleFilter = "";
-          let videoWidth = 1080;
-          let videoHeight = 1920;
-          if (aspectRatio === "9:16") {
-            scaleFilter = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1";
-            videoWidth = 1080;
-            videoHeight = 1920;
-          } else if (aspectRatio === "16:9") {
-            scaleFilter = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1";
-            videoWidth = 1920;
-            videoHeight = 1080;
-          }
-
-          for (let i = 0; i < engagingClips.length; i++) {
-            const clip = engagingClips[i];
-            const filename = `clip_${clip.id}_${Math.floor(clip.start)}s.mp4`;
-            const outputPath = path.join(sessionDir, filename);
-            const thumbFilename = `thumb_${clip.id}.jpg`;
-            const thumbPath = path.join(sessionDir, thumbFilename);
-
-            let videoFilter = scaleFilter;
-            
-            if (addCaptions && segments.length > 0) {
-              const srtPath = path.join(sessionDir, `clip_${clip.id}.srt`);
-              const srtContent = generateSRT(segments, clip.start, clip.end);
-              await writeFile(srtPath, srtContent, "utf-8");
-              
-              const escapedSrtPath = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-              videoFilter = `${scaleFilter},subtitles='${escapedSrtPath}':force_style='${getCaptionStyleASS(captionStyle, aspectRatio)}'`;
-            }
-
-            const ffmpegArgs = [
-              "-y", "-ss", formatTime(clip.start), "-i", videoPath, "-t", String(clip.duration),
-              "-vf", videoFilter,
-              "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-              "-c:a", "aac", "-b:a", "128k",
-              "-movflags", "+faststart",
-              outputPath
-            ];
-
-            await execFileAsync(getFfmpegPath(), ffmpegArgs);
-
-            await execFileAsync(getFfmpegPath(), [
-              "-y", "-ss", formatTime(clip.start + clip.duration / 2), "-i", videoPath,
-              "-vframes", "1", "-vf", scaleFilter + ",scale=320:-1",
-              "-q:v", "5", thumbPath
-            ]);
-
-            generatedClips.push({
-              id: clip.id,
-              filename,
-              downloadUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(filename)}`,
-              thumbnailUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(thumbFilename)}`,
-              start: clip.start,
-              end: clip.end,
-              duration: clip.duration,
-              text: clip.text,
-              score: clip.score,
-            });
-
-          const clipProgress = 70 + Math.floor((i + 1) / engagingClips.length * 25);
-          await updateJob(jobId, { progress: clipProgress });
-        }
-
-      const clipFiles = generatedClips.map((c) => path.join(sessionDir, c.filename));
-      const zipFilename = `clips_${jobId.slice(0, 8)}.zip`;
-      const zipPath = path.join(sessionDir, zipFilename);
-      await createZip(clipFiles, zipPath);
+      const generatedClips = engagingClips.map((clip, idx) => {
+        const startTime = Math.floor(clip.start);
+        const endTime = Math.ceil(clip.end);
+        
+        return {
+          id: idx + 1,
+          filename: `clip_${idx + 1}_${startTime}s-${endTime}s.mp4`,
+          downloadUrl: `https://www.youtube.com/watch?v=${videoId}&t=${startTime}`,
+          thumbnailUrl: `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
+          start: clip.start,
+          end: clip.end,
+          duration: clip.duration,
+          text: clip.text,
+          score: clip.score,
+          cobaltUrl: buildCobaltDownloadUrl(videoId, startTime, endTime),
+        };
+      });
 
       await updateJob(jobId, {
         status: "completed",
@@ -513,14 +380,10 @@ const generatedClips: Array<{
         progress: 100,
         clips: {
           items: generatedClips,
-          zipUrl: `/api/opus/job-file?jobId=${jobId}&file=${encodeURIComponent(zipFilename)}`,
+          videoId: videoId,
+          youtubeUrl: job.youtube_url,
         },
       });
-
-      try {
-          await unlink(audioPath);
-          await unlink(videoPath);
-        } catch {}
 
       return NextResponse.json({ success: true, jobId });
 
@@ -545,3 +408,9 @@ const generatedClips: Array<{
     );
   }
 }
+
+function buildCobaltDownloadUrl(videoId: string, start: number, end: number): string {
+  return `/api/opus/download-clip?videoId=${videoId}&start=${start}&end=${end}`;
+}
+
+export const maxDuration = 300;

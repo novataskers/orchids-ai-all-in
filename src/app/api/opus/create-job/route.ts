@@ -1,30 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import YTDlpWrap from "yt-dlp-wrap";
-import path from "path";
-import { existsSync } from "fs";
-import { mkdir } from "fs/promises";
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
-
-const isProduction = process.env.NODE_ENV === "production";
-const BIN_DIR = isProduction ? "/tmp/bin" : path.join(process.cwd(), "bin");
-const YTDLP_PATH = isProduction ? "/tmp/bin/yt-dlp" : path.join(BIN_DIR, "yt-dlp.exe");
-
-async function ensureYtdlp(): Promise<YTDlpWrap> {
-  if (!existsSync(BIN_DIR)) {
-    await mkdir(BIN_DIR, { recursive: true });
-  }
-  
-  if (!existsSync(YTDLP_PATH)) {
-    await YTDlpWrap.downloadFromGithub(YTDLP_PATH);
-  }
-  
-  return new YTDlpWrap(YTDLP_PATH);
-}
 
 function extractVideoId(url: string): string | null {
   const patterns = [
@@ -38,17 +18,43 @@ function extractVideoId(url: string): string | null {
   return null;
 }
 
+async function getVideoInfo(videoId: string): Promise<{ title: string; duration: number; thumbnail: string }> {
+  const defaultInfo = {
+    title: "YouTube Video",
+    duration: 0,
+    thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+  };
+  
+  try {
+    const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
+    const response = await fetch(oembedUrl);
+    
+    if (response.ok) {
+      const data = await response.json();
+      return {
+        title: data.title || defaultInfo.title,
+        duration: 0,
+        thumbnail: data.thumbnail_url || defaultInfo.thumbnail,
+      };
+    }
+  } catch (e) {
+    console.warn("Could not fetch video info:", e);
+  }
+  
+  return defaultInfo;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-const { 
-        url, 
-        clipDuration = 60, 
-        maxClips = 5, 
-        aspectRatio = "9:16",
-        addCaptions = true,
-        captionStyle = "bold"
-      } = body;
+    const { 
+      url, 
+      clipDuration = 60, 
+      maxClips = 5, 
+      aspectRatio = "9:16",
+      addCaptions = true,
+      captionStyle = "bold"
+    } = body;
 
     if (!url) {
       return NextResponse.json({ error: "No YouTube URL provided" }, { status: 400 });
@@ -61,89 +67,47 @@ const {
 
     const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
     
-    let title = "YouTube Video";
-    let duration = 0;
-    let thumbnail = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+    const videoInfo = await getVideoInfo(videoId);
 
-    try {
-      const ytdlp = await ensureYtdlp();
-      const metadata = await ytdlp.getVideoInfo(youtubeUrl);
-      title = metadata.title || title;
-      duration = metadata.duration || 0;
-      thumbnail = metadata.thumbnail || thumbnail;
-    } catch (e) {
-      console.warn("Could not fetch video info, using defaults:", e);
-    }
+    const { data: job, error } = await supabase
+      .from("opus_jobs")
+      .insert({
+        youtube_url: youtubeUrl,
+        video_id: videoId,
+        video_title: videoInfo.title,
+        video_duration: videoInfo.duration,
+        thumbnail_url: videoInfo.thumbnail,
+        status: "processing",
+        current_step: "queued",
+        progress: 5,
+        clip_duration: clipDuration,
+        max_clips: maxClips,
+        aspect_ratio: aspectRatio,
+        add_captions: addCaptions,
+        caption_style: captionStyle,
+      })
+      .select()
+      .single();
 
-const { data: job, error } = await supabase
-        .from("opus_jobs")
-        .insert({
-          youtube_url: youtubeUrl,
-          video_id: videoId,
-          video_title: title,
-          video_duration: duration,
-          thumbnail_url: thumbnail,
-          status: "processing",
-          current_step: "queued",
-          progress: 5,
-          clip_duration: clipDuration,
-          max_clips: maxClips,
-          aspect_ratio: aspectRatio,
-          add_captions: addCaptions,
-          caption_style: captionStyle,
-        })
-        .select()
-        .single();
-
-    if (error) {
-      throw new Error(`Database error: ${error.message}`);
-    }
-
-    processJobInBackground(job.id);
-
-    return NextResponse.json({
-      success: true,
-      jobId: job.id,
-      videoInfo: {
-        title,
-        duration,
-        thumbnail,
-        videoId,
-      },
-    });
-  } catch (error) {
-    console.error("Create job error:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to create job" },
-      { status: 500 }
-    );
-  }
-}
-
-async function processJobInBackground(jobId: string) {
-  const protocol = process.env.NODE_ENV === "production" ? "https" : "http";
-  const host = process.env.VERCEL_URL || process.env.NEXT_PUBLIC_APP_URL || "localhost:3000";
-  const baseUrl = host.startsWith("http") ? host : `${protocol}://${host}`;
-  
-  console.log(`[opus] Triggering background job: ${baseUrl}/api/opus/process-job for job ${jobId}`);
-  
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-  
-  fetch(`${baseUrl}/api/opus/process-job`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jobId }),
-    signal: controller.signal,
-  })
-    .then((res) => {
-      clearTimeout(timeout);
-      console.log(`[opus] Background job response: ${res.status}`);
-    })
-    .catch((err) => {
-      clearTimeout(timeout);
-      if (err.name !== "AbortError") {
-        console.error("[opus] Failed to trigger background job:", err);
+      if (error) {
+        throw new Error(`Database error: ${error.message}`);
       }
-    });
-}
+
+      return NextResponse.json({
+        success: true,
+        jobId: job.id,
+        videoInfo: {
+          title: videoInfo.title,
+          duration: videoInfo.duration,
+          thumbnail: videoInfo.thumbnail,
+          videoId,
+        },
+      });
+    } catch (error) {
+      console.error("Create job error:", error);
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Failed to create job" },
+        { status: 500 }
+      );
+    }
+  }

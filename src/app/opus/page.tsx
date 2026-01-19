@@ -21,6 +21,8 @@ import {
   CheckCircle2,
   Circle,
   AlertCircle,
+  ExternalLink,
+  Play,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -41,6 +43,7 @@ type GeneratedClip = {
   duration: number;
   text: string;
   score: number;
+  cobaltUrl?: string;
 };
 
 type JobStatus = {
@@ -50,7 +53,7 @@ type JobStatus = {
   progress: number;
   videoInfo: VideoInfo;
   transcription?: { text: string; segments: unknown[] };
-  clips?: { items: GeneratedClip[]; zipUrl: string };
+  clips?: { items: GeneratedClip[]; zipUrl?: string; videoId?: string; youtubeUrl?: string };
   errorMessage?: string;
 };
 
@@ -180,6 +183,12 @@ export default function OpusPage() {
       setJobId(data.jobId);
       setIsSubmitting(false);
       startPolling(data.jobId);
+
+      fetch("/api/opus/process-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: data.jobId }),
+      }).catch((err) => console.error("Process job trigger error:", err));
     } catch (error) {
       setIsSubmitting(false);
       setErrorMessage(error instanceof Error ? error.message : "Failed to create job");
@@ -504,60 +513,81 @@ export default function OpusPage() {
                   <div className="flex items-center justify-between">
                     <CardTitle className="flex items-center gap-2 font-mono text-lg text-zinc-200">
                       <FileVideo className="h-5 w-5 text-purple-400" />
-                      Generated Clips ({clips.length})
+                      Best Clips Found ({clips.length})
                     </CardTitle>
-                    {jobStatus?.clips?.zipUrl && (
-                      <a
-                        href={jobStatus.clips.zipUrl}
-                        download
-                        className="inline-flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 font-mono text-sm text-white transition-colors hover:bg-purple-500"
-                      >
-                        <Download className="h-4 w-4" />
-                        Download All
-                      </a>
-                    )}
                   </div>
+                  <p className="font-mono text-xs text-zinc-500 mt-2">
+                    AI found these engaging moments. Click to watch or download.
+                  </p>
                 </CardHeader>
-<CardContent className="space-y-4">
-                    {clips.map((clip) => (
-                      <div
-                        key={clip.id}
-                        className="flex items-start gap-4 rounded-lg bg-zinc-950 p-4 border border-zinc-800 hover:border-zinc-700 transition-colors"
-                      >
-                        {clip.thumbnailUrl && (
-                          <img
-                            src={clip.thumbnailUrl}
-                            alt={`Clip ${clip.id} preview`}
-                            className="w-24 h-auto rounded-lg object-cover flex-shrink-0"
-                          />
-                        )}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="font-mono text-sm font-medium text-purple-400">
-                              Clip {clip.id}
-                            </span>
-                            <span className="font-mono text-xs text-zinc-600">
-                              {formatDuration(clip.start)} - {formatDuration(clip.end)}
-                            </span>
-                            <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">
-                              Score: {clip.score.toFixed(1)}
-                            </span>
+                <CardContent className="space-y-4">
+                    {clips.map((clip) => {
+                      const videoId = jobStatus?.clips?.videoId;
+                      const youtubeWatchUrl = videoId 
+                        ? `https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(clip.start)}` 
+                        : "#";
+                      
+                      return (
+                        <div
+                          key={clip.id}
+                          className="flex items-start gap-4 rounded-lg bg-zinc-950 p-4 border border-zinc-800 hover:border-zinc-700 transition-colors"
+                        >
+                          <div className="relative flex-shrink-0">
+                            {clip.thumbnailUrl && (
+                              <img
+                                src={clip.thumbnailUrl}
+                                alt={`Clip ${clip.id} preview`}
+                                className="w-32 h-20 rounded-lg object-cover"
+                              />
+                            )}
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              <div className="bg-black/60 rounded-full p-2">
+                                <Play className="w-4 h-4 text-white fill-white" />
+                              </div>
+                            </div>
+                            <div className="absolute bottom-1 right-1 bg-black/80 px-1.5 py-0.5 rounded text-[10px] font-mono text-white">
+                              {formatDuration(clip.duration)}
+                            </div>
                           </div>
-                          {clip.text && (
-                            <p className="font-mono text-xs text-zinc-500 line-clamp-2">{clip.text}</p>
-                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                              <span className="font-mono text-sm font-medium text-purple-400">
+                                Clip {clip.id}
+                              </span>
+                              <span className="font-mono text-xs text-zinc-600">
+                                {formatDuration(clip.start)} - {formatDuration(clip.end)}
+                              </span>
+                              <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">
+                                Score: {clip.score.toFixed(1)}
+                              </span>
+                            </div>
+                            {clip.text && (
+                              <p className="font-mono text-xs text-zinc-500 line-clamp-2 mb-2">{clip.text}</p>
+                            )}
+                            <div className="flex items-center gap-2 mt-2">
+                              <a
+                                href={youtubeWatchUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-mono hover:bg-red-500 transition-colors"
+                              >
+                                <Youtube className="h-3.5 w-3.5" />
+                                Watch on YouTube
+                              </a>
+                              {clip.cobaltUrl && (
+                                <a
+                                  href={clip.cobaltUrl}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-mono hover:bg-purple-500 transition-colors"
+                                >
+                                  <Download className="h-3.5 w-3.5" />
+                                  Download
+                                </a>
+                              )}
+                            </div>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2 ml-4">
-                          <a
-                            href={clip.downloadUrl}
-                            download={clip.filename}
-                            className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-purple-600 text-white hover:bg-purple-500 transition-colors"
-                          >
-                            <Download className="h-4 w-4" />
-                          </a>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </CardContent>
               </Card>
             )}
