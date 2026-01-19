@@ -1,10 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import Groq from "groq-sdk";
-import { YtDlp } from "ytdlp-nodejs";
-import * as fs from "fs";
-import * as path from "path";
-import * as os from "os";
+import ytdl from "@distube/ytdl-core";
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -12,8 +9,6 @@ const supabase = createClient(
 );
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
-const ytdlp = new YtDlp();
 
 async function updateJob(jobId: string, updates: Record<string, unknown>) {
   await supabase
@@ -138,108 +133,68 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
   console.log(`[opus] Downloading audio for video: ${videoId}`);
   
   const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  const tempDir = os.tmpdir();
-  const outputPath = path.join(tempDir, `opus_${videoId}_${Date.now()}.mp3`);
   
-  try {
-    console.log(`[opus] Using yt-dlp to download audio...`);
-    
-    await ytdlp.downloadAsync(youtubeUrl, {
-      format: { filter: "audioonly", quality: "highest" },
-      output: outputPath,
-      extractAudio: true,
-      audioFormat: "mp3",
-      onProgress: (progress: { percent?: number }) => {
-        if (progress.percent) {
-          console.log(`[opus] Download progress: ${progress.percent.toFixed(1)}%`);
-        }
-      },
-    });
-    
-    if (!fs.existsSync(outputPath)) {
-      const files = fs.readdirSync(tempDir).filter(f => f.startsWith(`opus_${videoId}`));
-      if (files.length > 0) {
-        const actualPath = path.join(tempDir, files[0]);
-        const audioBuffer = fs.readFileSync(actualPath);
-        fs.unlinkSync(actualPath);
-        console.log(`[opus] Downloaded audio: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
-        return audioBuffer;
-      }
-      throw new Error("Download completed but file not found");
+  const playerClients: Array<"WEB" | "WEB_EMBEDDED" | "WEB_CREATOR" | "ANDROID" | "IOS" | "MWEB" | "TV"> = ["IOS", "ANDROID", "WEB_EMBEDDED", "WEB"];
+  
+  let info;
+  let lastError;
+  
+  for (const client of playerClients) {
+    try {
+      console.log(`[opus] Trying player client: ${client}`);
+      info = await ytdl.getInfo(youtubeUrl, {
+        playerClients: [client],
+      });
+      console.log(`[opus] Success with ${client}: ${info.videoDetails.title}`);
+      break;
+    } catch (err) {
+      console.log(`[opus] Failed with ${client}:`, err instanceof Error ? err.message : err);
+      lastError = err;
     }
-    
-    const audioBuffer = fs.readFileSync(outputPath);
-    fs.unlinkSync(outputPath);
-    
-    if (audioBuffer.length < 10000) {
-      throw new Error(`Downloaded file too small (${audioBuffer.length} bytes)`);
-    }
-    
-    console.log(`[opus] Downloaded audio via yt-dlp: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
-    return audioBuffer;
-    
-  } catch (ytdlpError) {
-    console.log(`[opus] yt-dlp failed: ${ytdlpError instanceof Error ? ytdlpError.message : String(ytdlpError)}`);
-    
-    if (fs.existsSync(outputPath)) {
-      try { fs.unlinkSync(outputPath); } catch {}
-    }
-    
-    console.log(`[opus] Trying fallback RapidAPI...`);
-    const rapidApiKey = process.env.RAPIDAPI_KEY;
-    
-    if (rapidApiKey) {
-      try {
-        const response = await fetch(`https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`, {
-          headers: {
-            "x-rapidapi-host": "youtube-mp36.p.rapidapi.com",
-            "x-rapidapi-key": rapidApiKey,
-          },
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          
-          if (data.status === "processing") {
-            console.log(`[opus] RapidAPI processing, polling...`);
-            for (let i = 0; i < 15; i++) {
-              await new Promise(r => setTimeout(r, 4000));
-              const retryRes = await fetch(`https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`, {
-                headers: { "x-rapidapi-host": "youtube-mp36.p.rapidapi.com", "x-rapidapi-key": rapidApiKey }
-              });
-              const retryData = await retryRes.json();
-              if (retryData.status === "ok" && retryData.link) {
-                const audioRes = await fetch(retryData.link);
-                if (audioRes.ok) {
-                  const buf = Buffer.from(await audioRes.arrayBuffer());
-                  if (buf.length > 10000) {
-                    console.log(`[opus] Downloaded via RapidAPI fallback: ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
-                    return buf;
-                  }
-                }
-              }
-              if (retryData.status === "fail") break;
-            }
-          }
-          
-          if (data.status === "ok" && data.link) {
-            const audioRes = await fetch(data.link);
-            if (audioRes.ok) {
-              const buf = Buffer.from(await audioRes.arrayBuffer());
-              if (buf.length > 10000) {
-                console.log(`[opus] Downloaded via RapidAPI fallback: ${(buf.length / 1024 / 1024).toFixed(2)} MB`);
-                return buf;
-              }
-            }
-          }
-        }
-      } catch (e) {
-        console.log(`[opus] RapidAPI fallback also failed: ${e}`);
-      }
-    }
-    
-    throw new Error(`Failed to download audio: ${ytdlpError instanceof Error ? ytdlpError.message : String(ytdlpError)}`);
   }
+  
+  if (!info) {
+    throw lastError || new Error("Failed to get video info from all player clients");
+  }
+  
+  const audioFormats = ytdl.filterFormats(info.formats, "audioonly");
+  if (audioFormats.length === 0) {
+    const anyFormat = info.formats.find(f => f.hasAudio);
+    if (!anyFormat) {
+      throw new Error("No audio formats available");
+    }
+    console.log(`[opus] No audio-only, using format with audio: ${anyFormat.mimeType}`);
+    
+    const chunks: Buffer[] = [];
+    const stream = ytdl(youtubeUrl, { format: anyFormat, playerClients });
+    
+    for await (const chunk of stream) {
+      chunks.push(Buffer.from(chunk));
+    }
+    
+    const audioBuffer = Buffer.concat(chunks);
+    console.log(`[opus] Downloaded: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+    return audioBuffer;
+  }
+  
+  const format = audioFormats.sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0))[0];
+  console.log(`[opus] Selected format: ${format.mimeType}, bitrate: ${format.audioBitrate}`);
+  
+  const chunks: Buffer[] = [];
+  const stream = ytdl(youtubeUrl, { format, playerClients });
+  
+  for await (const chunk of stream) {
+    chunks.push(Buffer.from(chunk));
+  }
+  
+  const audioBuffer = Buffer.concat(chunks);
+  console.log(`[opus] Downloaded audio: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+  
+  if (audioBuffer.length < 10000) {
+    throw new Error(`File too small (${audioBuffer.length} bytes)`);
+  }
+  
+  return audioBuffer;
 }
 
 async function transcribeWithWhisper(audioBuffer: Buffer): Promise<TranscriptSegment[]> {
