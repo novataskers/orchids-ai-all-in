@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import Groq from "groq-sdk";
-import ytdl from "@distube/ytdl-core";
+import { youtubeDl } from "yt-dlp-exec";
+import path from "path";
+import fs from "fs";
+import os from "os";
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -10,191 +13,90 @@ const supabase = createClient(
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-async function updateJob(jobId: string, updates: Record<string, unknown>) {
-  await supabase
-    .from("opus_jobs")
-    .update({ ...updates, updated_at: new Date().toISOString() })
-    .eq("id", jobId);
-}
+function getDownloadArgs() {
+  const cookiesJson = process.env.YOUTUBE_COOKIES;
+  const proxyUri = process.env.YOUTUBE_PROXY;
+  const args: Record<string, any> = {
+    extractAudio: true,
+    audioFormat: "mp3",
+    audioQuality: 0,
+    noCheckCertificates: true,
+    noWarnings: true,
+    preferFreeFormats: true,
+    addHeader: [
+      "referer:youtube.com",
+      "user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ]
+  };
 
-type TranscriptSegment = {
-  id: number;
-  start: number;
-  end: number;
-  text: string;
-};
-
-type ClipInfo = {
-  id: number;
-  start: number;
-  end: number;
-  duration: number;
-  text: string;
-  score: number;
-};
-
-function findEngagingClips(
-  segments: TranscriptSegment[],
-  clipDuration: number,
-  maxClips: number
-): ClipInfo[] {
-  if (segments.length === 0) return [];
-
-  const clips: ClipInfo[] = [];
-  const totalDuration = segments[segments.length - 1].end;
-
-  const engagementKeywords = [
-    "secret", "amazing", "incredible", "shocking", "important", "key", "tip",
-    "trick", "hack", "must", "need", "should", "best", "worst", "never", "always",
-    "mistake", "success", "fail", "win", "lose", "money", "free", "easy", "hard",
-    "simple", "quick", "fast", "how to", "why", "what if", "imagine", "think about",
-    "listen", "watch", "look", "here's", "this is", "the truth", "actually",
-    "believe", "crazy", "insane", "mind", "blow", "game changer", "life changing"
-  ];
-
-  const questionIndicators = ["?", "how", "why", "what", "when", "where", "who", "which"];
-  const emotionalWords = ["love", "hate", "fear", "hope", "dream", "angry", "happy", "sad", "excited"];
-
-  function scoreSegment(text: string): number {
-    let score = 0;
-    const lowerText = text.toLowerCase();
-
-    for (const keyword of engagementKeywords) {
-      if (lowerText.includes(keyword)) score += 2;
-    }
-
-    for (const q of questionIndicators) {
-      if (lowerText.includes(q)) score += 1.5;
-    }
-
-    for (const emotion of emotionalWords) {
-      if (lowerText.includes(emotion)) score += 1;
-    }
-
-    if (text.includes("!")) score += 0.5;
-
-    const wordCount = text.split(/\s+/).length;
-    if (wordCount >= 10 && wordCount <= 50) score += 1;
-
-    return score;
-  }
-
-  let currentStart = 0;
-  while (currentStart < totalDuration) {
-    const clipEnd = Math.min(currentStart + clipDuration, totalDuration);
-
-    const clipSegments = segments.filter(
-      (seg) => seg.start >= currentStart && seg.end <= clipEnd
-    );
-
-    if (clipSegments.length > 0) {
-      const clipText = clipSegments.map((s) => s.text).join(" ");
-      const score = scoreSegment(clipText);
-
-      clips.push({
-        id: clips.length,
-        start: currentStart,
-        end: clipEnd,
-        duration: clipEnd - currentStart,
-        text: clipText,
-        score,
-      });
-    }
-
-    currentStart += clipDuration * 0.5;
-  }
-
-  clips.sort((a, b) => b.score - a.score);
-
-  const selectedClips: ClipInfo[] = [];
-  for (const clip of clips) {
-    if (selectedClips.length >= maxClips) break;
-
-    const overlaps = selectedClips.some(
-      (selected) =>
-        (clip.start >= selected.start && clip.start < selected.end) ||
-        (clip.end > selected.start && clip.end <= selected.end)
-    );
-
-    if (!overlaps) {
-      selectedClips.push(clip);
+  if (cookiesJson) {
+    try {
+      const cookies = JSON.parse(cookiesJson);
+      const cookieFile = path.join(os.tmpdir(), `cookies_${Date.now()}.txt`);
+      let cookieContent = "# Netscape HTTP Cookie File\n";
+      for (const cookie of cookies) {
+        cookieContent += `${cookie.domain}\t${cookie.expirationDate ? "TRUE" : "FALSE"}\t${cookie.path}\t${cookie.secure ? "TRUE" : "FALSE"}\t${cookie.expirationDate || 0}\t${cookie.name}\t${cookie.value}\n`;
+      }
+      fs.writeFileSync(cookieFile, cookieContent);
+      args.cookies = cookieFile;
+      console.log("[opus] Using YouTube cookies for authentication");
+    } catch (e) {
+      console.warn("[opus] Failed to process YOUTUBE_COOKIES:", e);
     }
   }
 
-  selectedClips.sort((a, b) => a.start - b.start);
+  if (proxyUri) {
+    args.proxy = proxyUri;
+    console.log("[opus] Using proxy for download");
+  }
 
-  return selectedClips.map((clip, idx) => ({
-    ...clip,
-    id: idx + 1,
-  }));
+  return args;
 }
 
 async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
   console.log(`[opus] Downloading audio for video: ${videoId}`);
   
   const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const outputBase = path.join(os.tmpdir(), `audio_${videoId}_${Date.now()}`);
+  const outputPath = `${outputBase}.mp3`;
   
-  const playerClients: Array<"WEB" | "WEB_EMBEDDED" | "WEB_CREATOR" | "ANDROID" | "IOS" | "MWEB" | "TV"> = ["IOS", "ANDROID", "WEB_EMBEDDED", "WEB"];
-  
-  let info;
-  let lastError;
-  
-  for (const client of playerClients) {
-    try {
-      console.log(`[opus] Trying player client: ${client}`);
-      info = await ytdl.getInfo(youtubeUrl, {
-        playerClients: [client],
-      });
-      console.log(`[opus] Success with ${client}: ${info.videoDetails.title}`);
-      break;
-    } catch (err) {
-      console.log(`[opus] Failed with ${client}:`, err instanceof Error ? err.message : err);
-      lastError = err;
+  try {
+    const args = getDownloadArgs();
+    await youtubeDl(youtubeUrl, {
+      ...args,
+      output: outputBase + ".%(ext)s",
+    });
+
+    if (!fs.existsSync(outputPath)) {
+      // Sometimes yt-dlp might use a different extension if conversion fails
+      const files = fs.readdirSync(os.tmpdir());
+      const fallback = files.find(f => f.startsWith(path.basename(outputBase)));
+      if (fallback) {
+        const buffer = fs.readFileSync(path.join(os.tmpdir(), fallback));
+        // Clean up
+        fs.unlinkSync(path.join(os.tmpdir(), fallback));
+        if (args.cookies) fs.unlinkSync(args.cookies as string);
+        return buffer;
+      }
+      throw new Error("Download failed: Output file not found");
     }
-  }
-  
-  if (!info) {
-    throw lastError || new Error("Failed to get video info from all player clients");
-  }
-  
-  const audioFormats = ytdl.filterFormats(info.formats, "audioonly");
-  if (audioFormats.length === 0) {
-    const anyFormat = info.formats.find(f => f.hasAudio);
-    if (!anyFormat) {
-      throw new Error("No audio formats available");
+
+    const audioBuffer = fs.readFileSync(outputPath);
+    console.log(`[opus] Downloaded audio: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+
+    // Clean up
+    fs.unlinkSync(outputPath);
+    if (args.cookies) fs.unlinkSync(args.cookies as string);
+
+    if (audioBuffer.length < 10000) {
+      throw new Error(`File too small (${audioBuffer.length} bytes)`);
     }
-    console.log(`[opus] No audio-only, using format with audio: ${anyFormat.mimeType}`);
-    
-    const chunks: Buffer[] = [];
-    const stream = ytdl(youtubeUrl, { format: anyFormat, playerClients });
-    
-    for await (const chunk of stream) {
-      chunks.push(Buffer.from(chunk));
-    }
-    
-    const audioBuffer = Buffer.concat(chunks);
-    console.log(`[opus] Downloaded: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+
     return audioBuffer;
+  } catch (err) {
+    console.error("[opus] yt-dlp error:", err);
+    throw new Error(`Failed to download audio: ${err instanceof Error ? err.message : String(err)}`);
   }
-  
-  const format = audioFormats.sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0))[0];
-  console.log(`[opus] Selected format: ${format.mimeType}, bitrate: ${format.audioBitrate}`);
-  
-  const chunks: Buffer[] = [];
-  const stream = ytdl(youtubeUrl, { format, playerClients });
-  
-  for await (const chunk of stream) {
-    chunks.push(Buffer.from(chunk));
-  }
-  
-  const audioBuffer = Buffer.concat(chunks);
-  console.log(`[opus] Downloaded audio: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
-  
-  if (audioBuffer.length < 10000) {
-    throw new Error(`File too small (${audioBuffer.length} bytes)`);
-  }
-  
-  return audioBuffer;
 }
 
 async function transcribeWithWhisper(audioBuffer: Buffer): Promise<TranscriptSegment[]> {
