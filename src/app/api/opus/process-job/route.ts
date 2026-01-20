@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import Groq from "groq-sdk";
+import { exec } from "child_process";
+import { promisify } from "util";
+import fs from "fs";
+import path from "path";
+import os from "os";
+
+const execAsync = promisify(exec);
 
 type TranscriptSegment = {
   id: number;
@@ -77,10 +84,72 @@ function findEngagingClips(segments: TranscriptSegment[], targetDuration: number
     .slice(0, maxClips);
 }
 
+function convertCookiesToNetscape(jsonCookies: any[]): string {
+  const header = "# Netscape HTTP Cookie File\n# https://curl.haxx.se/rfc/cookie_spec.html\n# This is a generated file! Do not edit.\n\n";
+  const lines = jsonCookies.map(cookie => {
+    const domain = cookie.domain.startsWith('.') ? cookie.domain : `.${cookie.domain}`;
+    const flag = domain.startsWith('.') ? 'TRUE' : 'FALSE';
+    const path = cookie.path || '/';
+    const secure = cookie.secure ? 'TRUE' : 'FALSE';
+    const expiration = Math.floor(cookie.expirationDate || (Date.now() / 1000 + 86400 * 365));
+    const name = cookie.name;
+    const value = cookie.value;
+    return `${domain}\t${flag}\t${path}\t${secure}\t${expiration}\t${name}\t${value}`;
+  });
+  return header + lines.join('\n');
+}
+
 async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
   console.log(`[opus] Downloading audio for video: ${videoId}`);
+  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
   
-  // Method 1: Try youtube-mp36 RapidAPI (WORKING - tested)
+  // Method 1: Try yt-dlp with Netscape cookies
+  try {
+    console.log("[opus] Trying yt-dlp...");
+    const tempDir = os.tmpdir();
+    const timestamp = Date.now();
+    const outputPath = path.join(tempDir, `audio_${videoId}_${timestamp}.mp3`);
+    const cookiesPath = path.join(tempDir, `cookies_${videoId}_${timestamp}.txt`);
+    
+    let cookiesArg = "";
+    if (process.env.YOUTUBE_COOKIES) {
+      try {
+        const jsonCookies = JSON.parse(process.env.YOUTUBE_COOKIES);
+        const netscapeCookies = convertCookiesToNetscape(jsonCookies);
+        fs.writeFileSync(cookiesPath, netscapeCookies);
+        cookiesArg = `--cookies "${cookiesPath}"`;
+        console.log("[opus] Converted JSON cookies to Netscape format");
+      } catch (e) {
+        console.log("[opus] Failed to parse cookies:", e);
+      }
+    }
+    
+    const ytDlpPath = process.platform === "win32" ? "yt-dlp" : "/usr/local/bin/yt-dlp";
+    
+    try {
+      const command = `${ytDlpPath} ${cookiesArg} -x --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${youtubeUrl}"`;
+      console.log(`[opus] Executing yt-dlp command...`);
+      
+      const { stdout, stderr } = await execAsync(command, { timeout: 120000 });
+      console.log("[opus] yt-dlp stdout:", stdout?.slice(0, 500));
+      if (stderr) console.log("[opus] yt-dlp stderr:", stderr?.slice(0, 500));
+      
+      if (fs.existsSync(outputPath)) {
+        const buffer = fs.readFileSync(outputPath);
+        console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via yt-dlp`);
+        try { fs.unlinkSync(outputPath); } catch {}
+        try { if (fs.existsSync(cookiesPath)) fs.unlinkSync(cookiesPath); } catch {}
+        if (buffer.length > 10000) return buffer;
+      }
+    } catch (ytError: any) {
+      console.log("[opus] yt-dlp execution failed:", ytError?.message || ytError);
+      try { if (fs.existsSync(cookiesPath)) fs.unlinkSync(cookiesPath); } catch {}
+    }
+  } catch (e) {
+    console.log("[opus] yt-dlp method error:", e);
+  }
+
+  // Method 2: Try youtube-mp36 RapidAPI (most reliable)
   if (process.env.RAPIDAPI_KEY) {
     try {
       console.log("[opus] Trying youtube-mp36 API...");
@@ -116,8 +185,44 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
       console.log("[opus] youtube-mp36 error:", e);
     }
   }
+
+  // Method 3: Try Cobalt API (free, reliable)
+  try {
+    console.log("[opus] Trying Cobalt API...");
+    const cobaltResponse = await fetch("https://api.cobalt.tools/api/json", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({
+        url: youtubeUrl,
+        aFormat: "mp3",
+        isAudioOnly: true,
+        filenamePattern: "basic",
+      }),
+    });
+
+    if (cobaltResponse.ok) {
+      const cobaltData = await cobaltResponse.json();
+      console.log("[opus] Cobalt response:", JSON.stringify(cobaltData).slice(0, 300));
+      
+      if (cobaltData.url) {
+        console.log(`[opus] Got download URL from Cobalt`);
+        const audioResponse = await fetch(cobaltData.url);
+        if (audioResponse.ok) {
+          const arrayBuffer = await audioResponse.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+          console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via Cobalt`);
+          if (buffer.length > 10000) return buffer;
+        }
+      }
+    }
+  } catch (e) {
+    console.log("[opus] Cobalt error:", e);
+  }
   
-  // Method 2: Try ytstream RapidAPI
+  // Method 4: Try ytstream RapidAPI
   if (process.env.RAPIDAPI_KEY) {
     try {
       console.log("[opus] Trying ytstream API...");
@@ -158,7 +263,7 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
     }
   }
 
-  // Method 3: Try yt-api RapidAPI
+  // Method 5: Try yt-api RapidAPI
   if (process.env.RAPIDAPI_KEY) {
     try {
       console.log("[opus] Trying yt-api...");
