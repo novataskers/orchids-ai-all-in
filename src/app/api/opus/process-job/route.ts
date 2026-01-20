@@ -120,22 +120,35 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
         const data = await response.json();
         console.log("[opus] youtube-mp36 response:", JSON.stringify(data).slice(0, 300));
         
-        if (data.status === "ok" && data.link) {
-          console.log(`[opus] Got download URL from youtube-mp36`);
-          
-          const audioResponse = await fetch(data.link);
-          if (audioResponse.ok) {
-            const arrayBuffer = await audioResponse.arrayBuffer();
-            const buffer = Buffer.from(arrayBuffer);
-            console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via youtube-mp36`);
+          if (data.status === "ok" && data.link) {
+            console.log(`[opus] Got download URL from youtube-mp36: ${data.link.slice(0, 100)}...`);
             
-            if (buffer.length > 10000) {
-              return buffer;
+            const audioResponse = await fetch(data.link, {
+              headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://youtube-mp36.p.rapidapi.com/",
+              }
+            });
+            console.log(`[opus] youtube-mp36 download response: ${audioResponse.status} ${audioResponse.statusText}`);
+            
+            if (audioResponse.ok) {
+              const arrayBuffer = await audioResponse.arrayBuffer();
+              const buffer = Buffer.from(arrayBuffer);
+              console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via youtube-mp36`);
+              
+              if (buffer.length > 10000) {
+                return buffer;
+              } else {
+                console.log(`[opus] youtube-mp36 file too small: ${buffer.length} bytes`);
+              }
+            } else {
+              console.log(`[opus] youtube-mp36 download failed: ${audioResponse.status}`);
             }
           }
         }
-      }
-      console.log("[opus] youtube-mp36 method failed, trying alternatives...");
+        console.log("[opus] youtube-mp36 method failed, trying alternatives...");
     } catch (e) {
       console.log("[opus] youtube-mp36 error:", e);
     }
@@ -206,9 +219,17 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
           );
           
           if (audioFormat?.url) {
-            console.log(`[opus] Got audio URL from ytstream`);
-            const audioResponse = await fetch(audioFormat.url);
-            if (audioResponse.ok) {
+            console.log(`[opus] Got audio URL from ytstream: ${audioFormat.url.slice(0, 80)}...`);
+            const audioResponse = await fetch(audioFormat.url, {
+              headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+                "Range": "bytes=0-",
+              }
+            });
+            console.log(`[opus] ytstream download response: ${audioResponse.status} ${audioResponse.statusText}`);
+            
+            if (audioResponse.ok || audioResponse.status === 206) {
               const arrayBuffer = await audioResponse.arrayBuffer();
               const buffer = Buffer.from(arrayBuffer);
               console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via ytstream`);
