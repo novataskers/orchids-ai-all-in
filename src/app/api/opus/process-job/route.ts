@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import Groq from "groq-sdk";
-import { youtubeDl } from "yt-dlp-exec";
+import { execSync, spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import os from "os";
@@ -90,44 +90,24 @@ function findEngagingClips(segments: TranscriptSegment[], targetDuration: number
     .slice(0, maxClips);
 }
 
-function getDownloadArgs() {
+function prepareCookieFile(): string | null {
   const cookiesJson = process.env.YOUTUBE_COOKIES;
-  const proxyUri = process.env.YOUTUBE_PROXY;
-  const args: Record<string, any> = {
-    extractAudio: true,
-    audioFormat: "mp3",
-    audioQuality: 0,
-    noCheckCertificates: true,
-    noWarnings: true,
-    preferFreeFormats: true,
-    addHeader: [
-      "referer:youtube.com",
-      "user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ]
-  };
-
-  if (cookiesJson) {
-    try {
-      const cookies = JSON.parse(cookiesJson);
-      const cookieFile = path.join(os.tmpdir(), `cookies_${Date.now()}.txt`);
-      let cookieContent = "# Netscape HTTP Cookie File\n";
-      for (const cookie of cookies) {
-        cookieContent += `${cookie.domain}\t${cookie.expirationDate ? "TRUE" : "FALSE"}\t${cookie.path}\t${cookie.secure ? "TRUE" : "FALSE"}\t${cookie.expirationDate || 0}\t${cookie.name}\t${cookie.value}\n`;
-      }
-      fs.writeFileSync(cookieFile, cookieContent);
-      args.cookies = cookieFile;
-      console.log("[opus] Using YouTube cookies for authentication");
-    } catch (e) {
-      console.warn("[opus] Failed to process YOUTUBE_COOKIES:", e);
+  if (!cookiesJson) return null;
+  
+  try {
+    const cookies = JSON.parse(cookiesJson);
+    const cookieFile = path.join(os.tmpdir(), `cookies_${Date.now()}.txt`);
+    let cookieContent = "# Netscape HTTP Cookie File\n";
+    for (const cookie of cookies) {
+      cookieContent += `${cookie.domain}\t${cookie.expirationDate ? "TRUE" : "FALSE"}\t${cookie.path}\t${cookie.secure ? "TRUE" : "FALSE"}\t${cookie.expirationDate || 0}\t${cookie.name}\t${cookie.value}\n`;
     }
+    fs.writeFileSync(cookieFile, cookieContent);
+    console.log("[opus] Using YouTube cookies for authentication");
+    return cookieFile;
+  } catch (e) {
+    console.warn("[opus] Failed to process YOUTUBE_COOKIES:", e);
+    return null;
   }
-
-  if (proxyUri) {
-    args.proxy = proxyUri;
-    console.log("[opus] Using proxy for download");
-  }
-
-  return args;
 }
 
 async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
@@ -137,28 +117,63 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
   const outputBase = path.join(os.tmpdir(), `audio_${videoId}_${Date.now()}`);
   const outputPath = `${outputBase}.mp3`;
   
-  // Try to use the system yt-dlp binary if it exists (for Render compatibility)
-  const binaryPath = fs.existsSync("/usr/local/bin/yt-dlp") ? "/usr/local/bin/yt-dlp" : undefined;
-  if (binaryPath) {
-    console.log(`[opus] Using system yt-dlp binary at: ${binaryPath}`);
+  const ytdlpPath = fs.existsSync("/usr/local/bin/yt-dlp") ? "/usr/local/bin/yt-dlp" : "yt-dlp";
+  console.log(`[opus] Using yt-dlp at: ${ytdlpPath}`);
+  
+  const cookieFile = prepareCookieFile();
+  
+  const args = [
+    "-x",
+    "--audio-format", "mp3",
+    "--audio-quality", "0",
+    "--no-check-certificates",
+    "--no-warnings",
+    "--prefer-free-formats",
+    "--add-header", "referer:youtube.com",
+    "--add-header", "user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "-o", `${outputBase}.%(ext)s`,
+  ];
+  
+  if (cookieFile) {
+    args.push("--cookies", cookieFile);
   }
   
+  args.push(youtubeUrl);
+  
   try {
-    const args = getDownloadArgs();
-    await youtubeDl(youtubeUrl, {
-      ...args,
-      output: outputBase + ".%(ext)s",
-    }, binaryPath ? { binaryPath } : undefined);
+    await new Promise<void>((resolve, reject) => {
+      console.log(`[opus] Running: ${ytdlpPath} ${args.join(" ")}`);
+      const proc = spawn(ytdlpPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+      
+      let stdout = "";
+      let stderr = "";
+      
+      proc.stdout?.on("data", (data) => { stdout += data.toString(); });
+      proc.stderr?.on("data", (data) => { stderr += data.toString(); });
+      
+      proc.on("close", (code) => {
+        console.log(`[opus] yt-dlp stdout: ${stdout}`);
+        if (stderr) console.log(`[opus] yt-dlp stderr: ${stderr}`);
+        
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`yt-dlp exited with code ${code}: ${stderr || stdout}`));
+        }
+      });
+      
+      proc.on("error", (err) => {
+        reject(new Error(`Failed to spawn yt-dlp: ${err.message}`));
+      });
+    });
 
     if (!fs.existsSync(outputPath)) {
-      // Sometimes yt-dlp might use a different extension if conversion fails
       const files = fs.readdirSync(os.tmpdir());
       const fallback = files.find(f => f.startsWith(path.basename(outputBase)));
       if (fallback) {
         const buffer = fs.readFileSync(path.join(os.tmpdir(), fallback));
-        // Clean up
         fs.unlinkSync(path.join(os.tmpdir(), fallback));
-        if (args.cookies) fs.unlinkSync(args.cookies as string);
+        if (cookieFile) fs.unlinkSync(cookieFile);
         return buffer;
       }
       throw new Error("Download failed: Output file not found");
@@ -167,9 +182,8 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
     const audioBuffer = fs.readFileSync(outputPath);
     console.log(`[opus] Downloaded audio: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
 
-    // Clean up
     fs.unlinkSync(outputPath);
-    if (args.cookies) fs.unlinkSync(args.cookies as string);
+    if (cookieFile) fs.unlinkSync(cookieFile);
 
     if (audioBuffer.length < 10000) {
       throw new Error(`File too small (${audioBuffer.length} bytes)`);
@@ -178,6 +192,7 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
     return audioBuffer;
   } catch (err) {
     console.error("[opus] yt-dlp error:", err);
+    if (cookieFile && fs.existsSync(cookieFile)) fs.unlinkSync(cookieFile);
     throw new Error(`Failed to download audio: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
