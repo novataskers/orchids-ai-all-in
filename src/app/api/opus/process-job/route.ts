@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import Groq from "groq-sdk";
-import { execSync, spawn } from "child_process";
-import path from "path";
-import fs from "fs";
-import os from "os";
 
 type TranscriptSegment = {
   id: number;
@@ -43,9 +39,6 @@ async function updateJob(jobId: string, updates: any) {
 
 function findEngagingClips(segments: TranscriptSegment[], targetDuration: number, maxClips: number): EngagingClip[] {
   const clips: EngagingClip[] = [];
-  
-  // Simple heuristic: look for segments with "exciting" words or high information density
-  // In a real app, you might use LLM to find best parts
   const excitingWords = ["wow", "amazing", "incredible", "crazy", "secret", "hack", "trick", "finally", "stop", "listen"];
   
   for (let i = 0; i < segments.length; i++) {
@@ -60,14 +53,10 @@ function findEngagingClips(segments: TranscriptSegment[], targetDuration: number
       currentClipText += segments[j].text + " ";
       endTime = segments[j].end;
       
-      // Scoring based on exciting words
       excitingWords.forEach(word => {
         if (text.includes(word)) score += 10;
       });
-      
-      // Scoring based on length (prefer clips closer to target duration)
       score += 1;
-      
       j++;
     }
     
@@ -80,8 +69,6 @@ function findEngagingClips(segments: TranscriptSegment[], targetDuration: number
         score: score
       });
     }
-    
-    // Skip ahead to avoid too much overlap
     i = j;
   }
   
@@ -90,111 +77,160 @@ function findEngagingClips(segments: TranscriptSegment[], targetDuration: number
     .slice(0, maxClips);
 }
 
-function prepareCookieFile(): string | null {
-  const cookiesJson = process.env.YOUTUBE_COOKIES;
-  if (!cookiesJson) return null;
-  
-  try {
-    const cookies = JSON.parse(cookiesJson);
-    const cookieFile = path.join(os.tmpdir(), `cookies_${Date.now()}.txt`);
-    let cookieContent = "# Netscape HTTP Cookie File\n";
-    for (const cookie of cookies) {
-      cookieContent += `${cookie.domain}\t${cookie.expirationDate ? "TRUE" : "FALSE"}\t${cookie.path}\t${cookie.secure ? "TRUE" : "FALSE"}\t${cookie.expirationDate || 0}\t${cookie.name}\t${cookie.value}\n`;
-    }
-    fs.writeFileSync(cookieFile, cookieContent);
-    console.log("[opus] Using YouTube cookies for authentication");
-    return cookieFile;
-  } catch (e) {
-    console.warn("[opus] Failed to process YOUTUBE_COOKIES:", e);
-    return null;
-  }
-}
-
 async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
   console.log(`[opus] Downloading audio for video: ${videoId}`);
   
   const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  const outputBase = path.join(os.tmpdir(), `audio_${videoId}_${Date.now()}`);
-  const outputPath = `${outputBase}.mp3`;
   
-  const ytdlpPath = fs.existsSync("/usr/local/bin/yt-dlp") ? "/usr/local/bin/yt-dlp" : "yt-dlp";
-  console.log(`[opus] Using yt-dlp at: ${ytdlpPath}`);
-  
-  const cookieFile = prepareCookieFile();
-  
-  const args = [
-    "-x",
-    "--audio-format", "mp3",
-    "--audio-quality", "0",
-    "--no-check-certificates",
-    "--no-warnings",
-    "--prefer-free-formats",
-    "--add-header", "referer:youtube.com",
-    "--add-header", "user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "-o", `${outputBase}.%(ext)s`,
-  ];
-  
-  if (cookieFile) {
-    args.push("--cookies", cookieFile);
-  }
-  
-  args.push(youtubeUrl);
-  
-  try {
-    await new Promise<void>((resolve, reject) => {
-      console.log(`[opus] Running: ${ytdlpPath} ${args.join(" ")}`);
-      const proc = spawn(ytdlpPath, args, { stdio: ["ignore", "pipe", "pipe"] });
-      
-      let stdout = "";
-      let stderr = "";
-      
-      proc.stdout?.on("data", (data) => { stdout += data.toString(); });
-      proc.stderr?.on("data", (data) => { stderr += data.toString(); });
-      
-      proc.on("close", (code) => {
-        console.log(`[opus] yt-dlp stdout: ${stdout}`);
-        if (stderr) console.log(`[opus] yt-dlp stderr: ${stderr}`);
-        
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`yt-dlp exited with code ${code}: ${stderr || stdout}`));
+  // Method 1: Try RapidAPI YouTube MP3
+  if (process.env.RAPIDAPI_KEY) {
+    try {
+      console.log("[opus] Trying RapidAPI YouTube MP3...");
+      const response = await fetch(`https://youtube-mp310.p.rapidapi.com/download/mp3?url=${encodeURIComponent(youtubeUrl)}`, {
+        method: "GET",
+        headers: {
+          "x-rapidapi-key": process.env.RAPIDAPI_KEY,
+          "x-rapidapi-host": "youtube-mp310.p.rapidapi.com"
         }
       });
       
-      proc.on("error", (err) => {
-        reject(new Error(`Failed to spawn yt-dlp: ${err.message}`));
+      if (response.ok) {
+        const data = await response.json();
+        console.log("[opus] RapidAPI response:", JSON.stringify(data).slice(0, 200));
+        
+        if (data.downloadUrl || data.link) {
+          const downloadUrl = data.downloadUrl || data.link;
+          console.log(`[opus] Got download URL: ${downloadUrl.slice(0, 100)}...`);
+          
+          const audioResponse = await fetch(downloadUrl);
+          if (audioResponse.ok) {
+            const arrayBuffer = await audioResponse.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+            console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via RapidAPI`);
+            
+            if (buffer.length > 10000) {
+              return buffer;
+            }
+          }
+        }
+      }
+      console.log("[opus] RapidAPI method failed, trying alternatives...");
+    } catch (e) {
+      console.log("[opus] RapidAPI error:", e);
+    }
+  }
+  
+  // Method 2: Try ytmp3 RapidAPI
+  if (process.env.RAPIDAPI_KEY) {
+    try {
+      console.log("[opus] Trying ytmp3 API...");
+      const response = await fetch(`https://ytmp3-youtube-to-mp3-converter.p.rapidapi.com/download?url=${encodeURIComponent(youtubeUrl)}&format=mp3`, {
+        method: "GET",
+        headers: {
+          "x-rapidapi-key": process.env.RAPIDAPI_KEY,
+          "x-rapidapi-host": "ytmp3-youtube-to-mp3-converter.p.rapidapi.com"
+        }
       });
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log("[opus] ytmp3 response:", JSON.stringify(data).slice(0, 200));
+        
+        if (data.link || data.url) {
+          const downloadUrl = data.link || data.url;
+          const audioResponse = await fetch(downloadUrl);
+          if (audioResponse.ok) {
+            const arrayBuffer = await audioResponse.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+            console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via ytmp3`);
+            
+            if (buffer.length > 10000) {
+              return buffer;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log("[opus] ytmp3 error:", e);
+    }
+  }
+
+  // Method 3: Try Cobalt API (free, no API key needed)
+  try {
+    console.log("[opus] Trying Cobalt API...");
+    const cobaltResponse = await fetch("https://api.cobalt.tools/api/json", {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url: youtubeUrl,
+        aFormat: "mp3",
+        isAudioOnly: true,
+        filenamePattern: "basic",
+      }),
     });
 
-    if (!fs.existsSync(outputPath)) {
-      const files = fs.readdirSync(os.tmpdir());
-      const fallback = files.find(f => f.startsWith(path.basename(outputBase)));
-      if (fallback) {
-        const buffer = fs.readFileSync(path.join(os.tmpdir(), fallback));
-        fs.unlinkSync(path.join(os.tmpdir(), fallback));
-        if (cookieFile) fs.unlinkSync(cookieFile);
-        return buffer;
+    if (cobaltResponse.ok) {
+      const cobaltData = await cobaltResponse.json();
+      console.log("[opus] Cobalt response:", JSON.stringify(cobaltData).slice(0, 200));
+      
+      if (cobaltData.url) {
+        const audioResponse = await fetch(cobaltData.url);
+        if (audioResponse.ok) {
+          const arrayBuffer = await audioResponse.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+          console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via Cobalt`);
+          
+          if (buffer.length > 10000) {
+            return buffer;
+          }
+        }
       }
-      throw new Error("Download failed: Output file not found");
     }
-
-    const audioBuffer = fs.readFileSync(outputPath);
-    console.log(`[opus] Downloaded audio: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
-
-    fs.unlinkSync(outputPath);
-    if (cookieFile) fs.unlinkSync(cookieFile);
-
-    if (audioBuffer.length < 10000) {
-      throw new Error(`File too small (${audioBuffer.length} bytes)`);
-    }
-
-    return audioBuffer;
-  } catch (err) {
-    console.error("[opus] yt-dlp error:", err);
-    if (cookieFile && fs.existsSync(cookieFile)) fs.unlinkSync(cookieFile);
-    throw new Error(`Failed to download audio: ${err instanceof Error ? err.message : String(err)}`);
+  } catch (e) {
+    console.log("[opus] Cobalt error:", e);
   }
+  
+  // Method 4: Try y2mate RapidAPI 
+  if (process.env.RAPIDAPI_KEY) {
+    try {
+      console.log("[opus] Trying y2mate API...");
+      const analyzeResponse = await fetch(`https://y2mate-youtube-to-mp3-mp4-video-downloader.p.rapidapi.com/api/youtube/analyze?url=${encodeURIComponent(youtubeUrl)}`, {
+        method: "GET",
+        headers: {
+          "x-rapidapi-key": process.env.RAPIDAPI_KEY,
+          "x-rapidapi-host": "y2mate-youtube-to-mp3-mp4-video-downloader.p.rapidapi.com"
+        }
+      });
+      
+      if (analyzeResponse.ok) {
+        const analyzeData = await analyzeResponse.json();
+        console.log("[opus] y2mate analyze response:", JSON.stringify(analyzeData).slice(0, 300));
+        
+        // Find audio format
+        const audioFormat = analyzeData?.links?.audio?.[0] || analyzeData?.formats?.find((f: any) => f.format === "mp3");
+        if (audioFormat?.url || audioFormat?.link) {
+          const downloadUrl = audioFormat.url || audioFormat.link;
+          const audioResponse = await fetch(downloadUrl);
+          if (audioResponse.ok) {
+            const arrayBuffer = await audioResponse.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+            console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via y2mate`);
+            
+            if (buffer.length > 10000) {
+              return buffer;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log("[opus] y2mate error:", e);
+    }
+  }
+
+  throw new Error("All download methods failed. YouTube may be blocking this video or the APIs are unavailable.");
 }
 
 async function transcribeWithWhisper(audioBuffer: Buffer): Promise<TranscriptSegment[]> {
