@@ -15,46 +15,67 @@ export async function GET(request: NextRequest) {
     }
 
     const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    
-    const cobaltInstances = [
-      "https://api.cobalt.tools",
-      "https://cobalt-api.kwiatekmiki.com",
-      "https://cobalt.api.timelessnesses.me",
-    ];
-
     let downloadUrl: string | null = null;
 
-    for (const instance of cobaltInstances) {
+    // Method 1: Try ytstream RapidAPI for video
+    if (process.env.RAPIDAPI_KEY) {
       try {
-        const response = await fetch(`${instance}/api/json`, {
-          method: "POST",
+        console.log("[download-clip] Trying ytstream API...");
+        const response = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
+          method: "GET",
           headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-          },
-          body: JSON.stringify({
-            url: youtubeUrl,
-            vCodec: "h264",
-            vQuality: "720",
-            aFormat: "mp3",
-            isAudioOnly: false,
-            isNoTTWatermark: true,
-            isTTFullAudio: false,
-            disableMetadata: false,
-          }),
+            "x-rapidapi-key": process.env.RAPIDAPI_KEY,
+            "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
+          }
         });
-
-        if (!response.ok) continue;
         
-        const data = await response.json();
-        
-        if (data.status === "error") continue;
-        
-        downloadUrl = data.url;
-        if (downloadUrl) break;
+        if (response.ok) {
+          const data = await response.json();
+          
+          if (data.status === "OK" && data.formats) {
+            const videoFormat = data.formats.find((f: any) => 
+              f.mimeType?.includes("video/mp4") && f.qualityLabel && f.url
+            );
+            
+            if (videoFormat?.url) {
+              console.log(`[download-clip] Got video URL from ytstream: ${videoFormat.qualityLabel}`);
+              downloadUrl = videoFormat.url;
+            }
+          }
+        }
       } catch (e) {
-        console.log(`Cobalt instance ${instance} failed:`, e);
-        continue;
+        console.log("[download-clip] ytstream error:", e);
+      }
+    }
+
+    // Method 2: Try youtube-mp36 for video (though it's primarily for audio)
+    if (!downloadUrl && process.env.RAPIDAPI_KEY) {
+      try {
+        console.log("[download-clip] Trying yt-api for video...");
+        const response = await fetch(`https://yt-api.p.rapidapi.com/dl?id=${videoId}`, {
+          method: "GET",
+          headers: {
+            "x-rapidapi-key": process.env.RAPIDAPI_KEY,
+            "x-rapidapi-host": "yt-api.p.rapidapi.com"
+          }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          
+          if (data.formats) {
+            const videoFormat = data.formats.find((f: any) => 
+              f.mimeType?.includes("video/mp4") && f.url
+            );
+            
+            if (videoFormat?.url) {
+              console.log("[download-clip] Got video URL from yt-api");
+              downloadUrl = videoFormat.url;
+            }
+          }
+        }
+      } catch (e) {
+        console.log("[download-clip] yt-api error:", e);
       }
     }
 
