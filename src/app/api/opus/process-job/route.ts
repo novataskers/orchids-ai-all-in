@@ -101,55 +101,10 @@ function convertCookiesToNetscape(jsonCookies: any[]): string {
 
 async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
   console.log(`[opus] Downloading audio for video: ${videoId}`);
+  console.log(`[opus] RAPIDAPI_KEY present: ${!!process.env.RAPIDAPI_KEY}`);
   const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  
-  // Method 1: Try yt-dlp with Netscape cookies
-  try {
-    console.log("[opus] Trying yt-dlp...");
-    const tempDir = os.tmpdir();
-    const timestamp = Date.now();
-    const outputPath = path.join(tempDir, `audio_${videoId}_${timestamp}.mp3`);
-    const cookiesPath = path.join(tempDir, `cookies_${videoId}_${timestamp}.txt`);
-    
-    let cookiesArg = "";
-    if (process.env.YOUTUBE_COOKIES) {
-      try {
-        const jsonCookies = JSON.parse(process.env.YOUTUBE_COOKIES);
-        const netscapeCookies = convertCookiesToNetscape(jsonCookies);
-        fs.writeFileSync(cookiesPath, netscapeCookies);
-        cookiesArg = `--cookies "${cookiesPath}"`;
-        console.log("[opus] Converted JSON cookies to Netscape format");
-      } catch (e) {
-        console.log("[opus] Failed to parse cookies:", e);
-      }
-    }
-    
-    const ytDlpPath = process.platform === "win32" ? "yt-dlp" : "/usr/local/bin/yt-dlp";
-    
-    try {
-      const command = `${ytDlpPath} ${cookiesArg} -x --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${youtubeUrl}"`;
-      console.log(`[opus] Executing yt-dlp command...`);
-      
-      const { stdout, stderr } = await execAsync(command, { timeout: 120000 });
-      console.log("[opus] yt-dlp stdout:", stdout?.slice(0, 500));
-      if (stderr) console.log("[opus] yt-dlp stderr:", stderr?.slice(0, 500));
-      
-      if (fs.existsSync(outputPath)) {
-        const buffer = fs.readFileSync(outputPath);
-        console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via yt-dlp`);
-        try { fs.unlinkSync(outputPath); } catch {}
-        try { if (fs.existsSync(cookiesPath)) fs.unlinkSync(cookiesPath); } catch {}
-        if (buffer.length > 10000) return buffer;
-      }
-    } catch (ytError: any) {
-      console.log("[opus] yt-dlp execution failed:", ytError?.message || ytError);
-      try { if (fs.existsSync(cookiesPath)) fs.unlinkSync(cookiesPath); } catch {}
-    }
-  } catch (e) {
-    console.log("[opus] yt-dlp method error:", e);
-  }
 
-  // Method 2: Try youtube-mp36 RapidAPI (most reliable)
+  // Method 1: Try youtube-mp36 RapidAPI (most reliable - tested working)
   if (process.env.RAPIDAPI_KEY) {
     try {
       console.log("[opus] Trying youtube-mp36 API...");
@@ -186,40 +141,47 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
     }
   }
 
-  // Method 3: Try Cobalt API (free, reliable)
-  try {
-    console.log("[opus] Trying Cobalt API...");
-    const cobaltResponse = await fetch("https://api.cobalt.tools/api/json", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-      },
-      body: JSON.stringify({
-        url: youtubeUrl,
-        aFormat: "mp3",
-        isAudioOnly: true,
-        filenamePattern: "basic",
-      }),
-    });
+  // Method 3: Try Cobalt API (free, reliable) - multiple instances
+  const cobaltInstances = [
+    "https://api.cobalt.tools/api/json",
+    "https://co.wuk.sh/api/json",
+  ];
+  
+  for (const cobaltUrl of cobaltInstances) {
+    try {
+      console.log(`[opus] Trying Cobalt API at ${cobaltUrl}...`);
+      const cobaltResponse = await fetch(cobaltUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+        },
+        body: JSON.stringify({
+          url: youtubeUrl,
+          isAudioOnly: true,
+          aFormat: "mp3",
+        }),
+      });
 
-    if (cobaltResponse.ok) {
       const cobaltData = await cobaltResponse.json();
       console.log("[opus] Cobalt response:", JSON.stringify(cobaltData).slice(0, 300));
       
-      if (cobaltData.url) {
+      if (cobaltData.status === "stream" || cobaltData.status === "tunnel" || cobaltData.url) {
+        const downloadUrl = cobaltData.url;
         console.log(`[opus] Got download URL from Cobalt`);
-        const audioResponse = await fetch(cobaltData.url);
+        const audioResponse = await fetch(downloadUrl);
         if (audioResponse.ok) {
           const arrayBuffer = await audioResponse.arrayBuffer();
           const buffer = Buffer.from(arrayBuffer);
           console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via Cobalt`);
           if (buffer.length > 10000) return buffer;
         }
+      } else if (cobaltData.status === "error") {
+        console.log("[opus] Cobalt error:", cobaltData.text);
       }
+    } catch (e) {
+      console.log(`[opus] Cobalt instance ${cobaltUrl} error:`, e);
     }
-  } catch (e) {
-    console.log("[opus] Cobalt error:", e);
   }
   
   // Method 4: Try ytstream RapidAPI
@@ -298,9 +260,55 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
           }
         }
       }
-    } catch (e) {
-      console.log("[opus] yt-api error:", e);
+      } catch (e) {
+        console.log("[opus] yt-api error:", e);
+      }
     }
+
+  // Method 5: Try yt-dlp with Netscape cookies (last resort)
+  try {
+    console.log("[opus] Trying yt-dlp...");
+    const tempDir = os.tmpdir();
+    const timestamp = Date.now();
+    const outputPath = path.join(tempDir, `audio_${videoId}_${timestamp}.mp3`);
+    const cookiesPath = path.join(tempDir, `cookies_${videoId}_${timestamp}.txt`);
+    
+    let cookiesArg = "";
+    if (process.env.YOUTUBE_COOKIES) {
+      try {
+        const jsonCookies = JSON.parse(process.env.YOUTUBE_COOKIES);
+        const netscapeCookies = convertCookiesToNetscape(jsonCookies);
+        fs.writeFileSync(cookiesPath, netscapeCookies);
+        cookiesArg = `--cookies "${cookiesPath}"`;
+        console.log("[opus] Converted JSON cookies to Netscape format");
+      } catch (e) {
+        console.log("[opus] Failed to parse cookies:", e);
+      }
+    }
+    
+    const ytDlpPath = process.platform === "win32" ? "yt-dlp" : "/usr/local/bin/yt-dlp";
+    
+    try {
+      const command = `${ytDlpPath} ${cookiesArg} -x --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${youtubeUrl}"`;
+      console.log(`[opus] Executing yt-dlp command...`);
+      
+      const { stdout, stderr } = await execAsync(command, { timeout: 120000 });
+      console.log("[opus] yt-dlp stdout:", stdout?.slice(0, 500));
+      if (stderr) console.log("[opus] yt-dlp stderr:", stderr?.slice(0, 500));
+      
+      if (fs.existsSync(outputPath)) {
+        const buffer = fs.readFileSync(outputPath);
+        console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via yt-dlp`);
+        try { fs.unlinkSync(outputPath); } catch {}
+        try { if (fs.existsSync(cookiesPath)) fs.unlinkSync(cookiesPath); } catch {}
+        if (buffer.length > 10000) return buffer;
+      }
+    } catch (ytError: any) {
+      console.log("[opus] yt-dlp execution failed:", ytError?.message || ytError);
+      try { if (fs.existsSync(cookiesPath)) fs.unlinkSync(cookiesPath); } catch {}
+    }
+  } catch (e) {
+    console.log("[opus] yt-dlp method error:", e);
   }
 
   throw new Error("All download methods failed. Please check your RapidAPI subscription or try a different video.");
