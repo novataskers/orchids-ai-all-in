@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const maxDuration = 300;
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -16,6 +18,7 @@ export async function GET(request: NextRequest) {
 
     const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
     let downloadUrl: string | null = null;
+    let contentType = "video/mp4";
 
     // Method 1: Try ytstream RapidAPI for video
     if (process.env.RAPIDAPI_KEY) {
@@ -40,6 +43,7 @@ export async function GET(request: NextRequest) {
             if (videoFormat?.url) {
               console.log(`[download-clip] Got video URL from ytstream: ${videoFormat.qualityLabel}`);
               downloadUrl = videoFormat.url;
+              contentType = videoFormat.mimeType?.split(";")[0] || "video/mp4";
             }
           }
         }
@@ -48,7 +52,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Method 2: Try youtube-mp36 for video (though it's primarily for audio)
+    // Method 2: Try yt-api
     if (!downloadUrl && process.env.RAPIDAPI_KEY) {
       try {
         console.log("[download-clip] Trying yt-api for video...");
@@ -71,6 +75,7 @@ export async function GET(request: NextRequest) {
             if (videoFormat?.url) {
               console.log("[download-clip] Got video URL from yt-api");
               downloadUrl = videoFormat.url;
+              contentType = videoFormat.mimeType?.split(";")[0] || "video/mp4";
             }
           }
         }
@@ -87,7 +92,35 @@ export async function GET(request: NextRequest) {
       }, { status: 503 });
     }
 
-    return NextResponse.redirect(downloadUrl);
+    // Proxy the video through our server to avoid IP-locking issues
+    console.log("[download-clip] Proxying video download...");
+    const videoResponse = await fetch(downloadUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Range": "bytes=0-",
+      }
+    });
+
+    if (!videoResponse.ok && videoResponse.status !== 206) {
+      console.log(`[download-clip] Video fetch failed: ${videoResponse.status}`);
+      return NextResponse.json({
+        error: "Failed to download video. Please try downloading directly from YouTube.",
+        youtubeUrl: `${youtubeUrl}&t=${start}`,
+      }, { status: 503 });
+    }
+
+    const videoBuffer = await videoResponse.arrayBuffer();
+    console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+
+    return new NextResponse(videoBuffer, {
+      headers: {
+        "Content-Type": contentType,
+        "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
+        "Content-Length": videoBuffer.byteLength.toString(),
+      }
+    });
     
   } catch (error) {
     console.error("Download clip error:", error);
