@@ -80,33 +80,30 @@ function findEngagingClips(segments: TranscriptSegment[], targetDuration: number
 async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
   console.log(`[opus] Downloading audio for video: ${videoId}`);
   
-  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  
-  // Method 1: Try RapidAPI YouTube MP3
+  // Method 1: Try youtube-mp36 RapidAPI (WORKING - tested)
   if (process.env.RAPIDAPI_KEY) {
     try {
-      console.log("[opus] Trying RapidAPI YouTube MP3...");
-      const response = await fetch(`https://youtube-mp310.p.rapidapi.com/download/mp3?url=${encodeURIComponent(youtubeUrl)}`, {
+      console.log("[opus] Trying youtube-mp36 API...");
+      const response = await fetch(`https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`, {
         method: "GET",
         headers: {
           "x-rapidapi-key": process.env.RAPIDAPI_KEY,
-          "x-rapidapi-host": "youtube-mp310.p.rapidapi.com"
+          "x-rapidapi-host": "youtube-mp36.p.rapidapi.com"
         }
       });
       
       if (response.ok) {
         const data = await response.json();
-        console.log("[opus] RapidAPI response:", JSON.stringify(data).slice(0, 200));
+        console.log("[opus] youtube-mp36 response:", JSON.stringify(data).slice(0, 300));
         
-        if (data.downloadUrl || data.link) {
-          const downloadUrl = data.downloadUrl || data.link;
-          console.log(`[opus] Got download URL: ${downloadUrl.slice(0, 100)}...`);
+        if (data.status === "ok" && data.link) {
+          console.log(`[opus] Got download URL from youtube-mp36`);
           
-          const audioResponse = await fetch(downloadUrl);
+          const audioResponse = await fetch(data.link);
           if (audioResponse.ok) {
             const arrayBuffer = await audioResponse.arrayBuffer();
             const buffer = Buffer.from(arrayBuffer);
-            console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via RapidAPI`);
+            console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via youtube-mp36`);
             
             if (buffer.length > 10000) {
               return buffer;
@@ -114,123 +111,94 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
           }
         }
       }
-      console.log("[opus] RapidAPI method failed, trying alternatives...");
+      console.log("[opus] youtube-mp36 method failed, trying alternatives...");
     } catch (e) {
-      console.log("[opus] RapidAPI error:", e);
+      console.log("[opus] youtube-mp36 error:", e);
     }
   }
   
-  // Method 2: Try ytmp3 RapidAPI
+  // Method 2: Try ytstream RapidAPI
   if (process.env.RAPIDAPI_KEY) {
     try {
-      console.log("[opus] Trying ytmp3 API...");
-      const response = await fetch(`https://ytmp3-youtube-to-mp3-converter.p.rapidapi.com/download?url=${encodeURIComponent(youtubeUrl)}&format=mp3`, {
+      console.log("[opus] Trying ytstream API...");
+      const response = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
         method: "GET",
         headers: {
           "x-rapidapi-key": process.env.RAPIDAPI_KEY,
-          "x-rapidapi-host": "ytmp3-youtube-to-mp3-converter.p.rapidapi.com"
+          "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
         }
       });
       
       if (response.ok) {
         const data = await response.json();
-        console.log("[opus] ytmp3 response:", JSON.stringify(data).slice(0, 200));
+        console.log("[opus] ytstream response:", JSON.stringify(data).slice(0, 300));
         
-        if (data.link || data.url) {
-          const downloadUrl = data.link || data.url;
-          const audioResponse = await fetch(downloadUrl);
-          if (audioResponse.ok) {
-            const arrayBuffer = await audioResponse.arrayBuffer();
-            const buffer = Buffer.from(arrayBuffer);
-            console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via ytmp3`);
-            
-            if (buffer.length > 10000) {
-              return buffer;
+        if (data.status === "OK" && data.adaptiveFormats) {
+          const audioFormat = data.adaptiveFormats.find((f: any) => 
+            f.mimeType?.includes("audio") && f.url
+          );
+          
+          if (audioFormat?.url) {
+            console.log(`[opus] Got audio URL from ytstream`);
+            const audioResponse = await fetch(audioFormat.url);
+            if (audioResponse.ok) {
+              const arrayBuffer = await audioResponse.arrayBuffer();
+              const buffer = Buffer.from(arrayBuffer);
+              console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via ytstream`);
+              
+              if (buffer.length > 10000) {
+                return buffer;
+              }
             }
           }
         }
       }
     } catch (e) {
-      console.log("[opus] ytmp3 error:", e);
+      console.log("[opus] ytstream error:", e);
     }
   }
 
-  // Method 3: Try Cobalt API (free, no API key needed)
-  try {
-    console.log("[opus] Trying Cobalt API...");
-    const cobaltResponse = await fetch("https://api.cobalt.tools/api/json", {
-      method: "POST",
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: youtubeUrl,
-        aFormat: "mp3",
-        isAudioOnly: true,
-        filenamePattern: "basic",
-      }),
-    });
-
-    if (cobaltResponse.ok) {
-      const cobaltData = await cobaltResponse.json();
-      console.log("[opus] Cobalt response:", JSON.stringify(cobaltData).slice(0, 200));
-      
-      if (cobaltData.url) {
-        const audioResponse = await fetch(cobaltData.url);
-        if (audioResponse.ok) {
-          const arrayBuffer = await audioResponse.arrayBuffer();
-          const buffer = Buffer.from(arrayBuffer);
-          console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via Cobalt`);
-          
-          if (buffer.length > 10000) {
-            return buffer;
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.log("[opus] Cobalt error:", e);
-  }
-  
-  // Method 4: Try y2mate RapidAPI 
+  // Method 3: Try yt-api RapidAPI
   if (process.env.RAPIDAPI_KEY) {
     try {
-      console.log("[opus] Trying y2mate API...");
-      const analyzeResponse = await fetch(`https://y2mate-youtube-to-mp3-mp4-video-downloader.p.rapidapi.com/api/youtube/analyze?url=${encodeURIComponent(youtubeUrl)}`, {
+      console.log("[opus] Trying yt-api...");
+      const response = await fetch(`https://yt-api.p.rapidapi.com/dl?id=${videoId}`, {
         method: "GET",
         headers: {
           "x-rapidapi-key": process.env.RAPIDAPI_KEY,
-          "x-rapidapi-host": "y2mate-youtube-to-mp3-mp4-video-downloader.p.rapidapi.com"
+          "x-rapidapi-host": "yt-api.p.rapidapi.com"
         }
       });
       
-      if (analyzeResponse.ok) {
-        const analyzeData = await analyzeResponse.json();
-        console.log("[opus] y2mate analyze response:", JSON.stringify(analyzeData).slice(0, 300));
+      if (response.ok) {
+        const data = await response.json();
+        console.log("[opus] yt-api response:", JSON.stringify(data).slice(0, 300));
         
-        // Find audio format
-        const audioFormat = analyzeData?.links?.audio?.[0] || analyzeData?.formats?.find((f: any) => f.format === "mp3");
-        if (audioFormat?.url || audioFormat?.link) {
-          const downloadUrl = audioFormat.url || audioFormat.link;
-          const audioResponse = await fetch(downloadUrl);
-          if (audioResponse.ok) {
-            const arrayBuffer = await audioResponse.arrayBuffer();
-            const buffer = Buffer.from(arrayBuffer);
-            console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via y2mate`);
-            
-            if (buffer.length > 10000) {
-              return buffer;
+        if (data.adaptiveFormats) {
+          const audioFormat = data.adaptiveFormats.find((f: any) => 
+            f.mimeType?.includes("audio") && f.url
+          );
+          
+          if (audioFormat?.url) {
+            const audioResponse = await fetch(audioFormat.url);
+            if (audioResponse.ok) {
+              const arrayBuffer = await audioResponse.arrayBuffer();
+              const buffer = Buffer.from(arrayBuffer);
+              console.log(`[opus] Downloaded ${(buffer.length / 1024 / 1024).toFixed(2)} MB via yt-api`);
+              
+              if (buffer.length > 10000) {
+                return buffer;
+              }
             }
           }
         }
       }
     } catch (e) {
-      console.log("[opus] y2mate error:", e);
+      console.log("[opus] yt-api error:", e);
     }
   }
 
-  throw new Error("All download methods failed. YouTube may be blocking this video or the APIs are unavailable.");
+  throw new Error("All download methods failed. Please check your RapidAPI subscription or try a different video.");
 }
 
 async function transcribeWithWhisper(audioBuffer: Buffer): Promise<TranscriptSegment[]> {
