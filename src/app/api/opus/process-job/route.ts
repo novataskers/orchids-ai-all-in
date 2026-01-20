@@ -6,12 +6,89 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 
+type TranscriptSegment = {
+  id: number;
+  start: number;
+  end: number;
+  text: string;
+};
+
+type EngagingClip = {
+  start: number;
+  end: number;
+  duration: number;
+  text: string;
+  score: number;
+};
+
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+async function updateJob(jobId: string, updates: any) {
+  try {
+    const { error } = await supabase
+      .from("opus_jobs")
+      .update(updates)
+      .eq("id", jobId);
+    
+    if (error) throw error;
+  } catch (e) {
+    console.error(`[opus] Error updating job ${jobId}:`, e);
+  }
+}
+
+function findEngagingClips(segments: TranscriptSegment[], targetDuration: number, maxClips: number): EngagingClip[] {
+  const clips: EngagingClip[] = [];
+  
+  // Simple heuristic: look for segments with "exciting" words or high information density
+  // In a real app, you might use LLM to find best parts
+  const excitingWords = ["wow", "amazing", "incredible", "crazy", "secret", "hack", "trick", "finally", "stop", "listen"];
+  
+  for (let i = 0; i < segments.length; i++) {
+    let currentClipText = "";
+    let startTime = segments[i].start;
+    let endTime = segments[i].end;
+    let score = 0;
+    
+    let j = i;
+    while (j < segments.length && (segments[j].end - startTime) <= targetDuration) {
+      const text = segments[j].text.toLowerCase();
+      currentClipText += segments[j].text + " ";
+      endTime = segments[j].end;
+      
+      // Scoring based on exciting words
+      excitingWords.forEach(word => {
+        if (text.includes(word)) score += 10;
+      });
+      
+      // Scoring based on length (prefer clips closer to target duration)
+      score += 1;
+      
+      j++;
+    }
+    
+    if (currentClipText.trim().length > 50) {
+      clips.push({
+        start: startTime,
+        end: endTime,
+        duration: endTime - startTime,
+        text: currentClipText.trim(),
+        score: score
+      });
+    }
+    
+    // Skip ahead to avoid too much overlap
+    i = j;
+  }
+  
+  return clips
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxClips);
+}
 
 function getDownloadArgs() {
   const cookiesJson = process.env.YOUTUBE_COOKIES;
@@ -60,12 +137,18 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
   const outputBase = path.join(os.tmpdir(), `audio_${videoId}_${Date.now()}`);
   const outputPath = `${outputBase}.mp3`;
   
+  // Try to use the system yt-dlp binary if it exists (for Render compatibility)
+  const binaryPath = fs.existsSync("/usr/local/bin/yt-dlp") ? "/usr/local/bin/yt-dlp" : undefined;
+  if (binaryPath) {
+    console.log(`[opus] Using system yt-dlp binary at: ${binaryPath}`);
+  }
+  
   try {
     const args = getDownloadArgs();
     await youtubeDl(youtubeUrl, {
       ...args,
       output: outputBase + ".%(ext)s",
-    });
+    }, binaryPath ? { binaryPath } : undefined);
 
     if (!fs.existsSync(outputPath)) {
       // Sometimes yt-dlp might use a different extension if conversion fails
