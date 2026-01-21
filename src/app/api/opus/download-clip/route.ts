@@ -1,68 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import path from "path";
 import fs from "fs";
 import os from "os";
 
 export const maxDuration = 300;
 
-async function getVideoStreamUrl(videoId: string): Promise<{ videoUrl: string; audioUrl?: string } | null> {
-  const rapidApiKey = process.env.RAPIDAPI_KEY;
-  
-  if (!rapidApiKey) {
-    return null;
-  }
-
-  try {
-    const response = await fetch(`https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId=${videoId}`, {
-      method: "GET",
-      headers: {
-        "x-rapidapi-key": rapidApiKey,
-        "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com"
-      }
-    });
-    
-    if (response.ok) {
-      const data = await response.json();
-      if (data.videos?.items) {
-        const mp4WithAudio = data.videos.items.find((v: any) => 
-          v.extension === "mp4" && v.hasAudio && v.url
-        );
-        if (mp4WithAudio?.url) return { videoUrl: mp4WithAudio.url };
-      }
-    }
-  } catch (e) {}
-
-  try {
-    const response = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
-      method: "GET",
-      headers: {
-        "x-rapidapi-key": rapidApiKey,
-        "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
-      }
-    });
-    
-    if (response.ok) {
-      const data = await response.json();
-      if (data.status === "OK" && data.formats) {
-        const videoFormat = data.formats.find((f: any) => 
-          f.mimeType?.includes("video/mp4") && f.hasAudio && f.hasVideo && f.url
-        ) || data.formats.find((f: any) => 
-          f.mimeType?.includes("video/mp4") && f.url
-        );
-        if (videoFormat?.url) return { videoUrl: videoFormat.url };
-      }
-    }
-  } catch (e) {}
-  
-  return null;
-}
-
 function formatTime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
   return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
+function checkYtdlp(): boolean {
+  try {
+    execSync("yt-dlp --version", { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -79,12 +36,21 @@ export async function GET(request: NextRequest) {
   const endSec = parseInt(end);
   const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const tempDir = os.tmpdir();
-  const outputPath = path.join(tempDir, `clip-${videoId}-${start}-${end}-${Date.now()}.mp4`);
-  const cookiePath = path.join(tempDir, `cookies-${Date.now()}.txt`);
+  const timestamp = Date.now();
+  const outputPath = path.join(tempDir, `clip-${videoId}-${timestamp}.mp4`);
+  const cookiePath = path.join(tempDir, `cookies-${timestamp}.txt`);
+
+  const hasYtdlp = checkYtdlp();
+  console.log(`[download-clip] yt-dlp available: ${hasYtdlp}`);
+
+  if (!hasYtdlp) {
+    return NextResponse.json({ 
+      error: "yt-dlp not available on server. Please ensure Dockerfile installs yt-dlp." 
+    }, { status: 500 });
+  }
 
   try {
-    // 1. Try yt-dlp (Best for Railway)
-    console.log(`[download-clip] Attempting yt-dlp for ${videoId} (${start}-${end})`);
+    console.log(`[download-clip] Processing ${videoId} from ${start}s to ${end}s`);
     
     const cookies = process.env.YOUTUBE_COOKIES;
     if (cookies) {
@@ -92,9 +58,10 @@ export async function GET(request: NextRequest) {
         const cookieData = JSON.parse(cookies);
         let cookieContent = "# Netscape HTTP Cookie File\n";
         cookieData.forEach((c: any) => {
-          cookieContent += `${c.domain}\tTRUE\t${c.path}\t${c.secure ? "TRUE" : "FALSE"}\t${c.expirationDate || 0}\t${c.name}\t${c.value}\n`;
+          cookieContent += `${c.domain}\tTRUE\t${c.path}\t${c.secure ? "TRUE" : "FALSE"}\t${Math.floor(c.expirationDate || 0)}\t${c.name}\t${c.value}\n`;
         });
         fs.writeFileSync(cookiePath, cookieContent);
+        console.log(`[download-clip] Cookie file created`);
       } catch (e) {
         console.error("[download-clip] Error writing cookies:", e);
       }
@@ -104,9 +71,12 @@ export async function GET(request: NextRequest) {
     const endTimeStr = formatTime(endSec);
     
     const args = [
+      "--no-warnings",
+      "--no-playlist",
       "--download-sections", `*${startTimeStr}-${endTimeStr}`,
       "--force-keyframes-at-cuts",
-      "-f", "mp4",
+      "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+      "--merge-output-format", "mp4",
       "-o", outputPath,
       youtubeUrl
     ];
@@ -115,42 +85,59 @@ export async function GET(request: NextRequest) {
       args.unshift("--cookies", cookiePath);
     }
 
-    const ytdlp = spawn("yt-dlp", args);
+    console.log(`[download-clip] Running: yt-dlp ${args.join(" ")}`);
 
-    const success = await new Promise((resolve) => {
-      let errorLog = "";
-      ytdlp.stderr.on("data", (data) => errorLog += data.toString());
+    const ytdlpResult = await new Promise<{ success: boolean; error: string }>((resolve) => {
+      const ytdlp = spawn("yt-dlp", args);
+      let stdout = "";
+      let stderr = "";
+      
+      ytdlp.stdout.on("data", (data) => {
+        stdout += data.toString();
+        console.log(`[yt-dlp stdout] ${data.toString().trim()}`);
+      });
+      
+      ytdlp.stderr.on("data", (data) => {
+        stderr += data.toString();
+        console.log(`[yt-dlp stderr] ${data.toString().trim()}`);
+      });
+      
       ytdlp.on("close", (code) => {
-        if (code === 0 && fs.existsSync(outputPath)) {
-          resolve(true);
+        console.log(`[download-clip] yt-dlp exited with code ${code}`);
+        if (code === 0) {
+          resolve({ success: true, error: "" });
         } else {
-          console.error(`[download-clip] yt-dlp failed with code ${code}: ${errorLog}`);
-          resolve(false);
+          resolve({ success: false, error: stderr || stdout || `Exit code: ${code}` });
         }
+      });
+      
+      ytdlp.on("error", (err) => {
+        console.error(`[download-clip] yt-dlp spawn error:`, err);
+        resolve({ success: false, error: err.message });
       });
     });
 
-    if (success) {
-      const stats = fs.statSync(outputPath);
-      const fileStream = fs.createReadStream(outputPath);
-      
-      // We need to handle the readable stream conversion for Next.js response
-      const stream = new ReadableStream({
-        start(controller) {
-          fileStream.on("data", (chunk) => controller.enqueue(chunk));
-          fileStream.on("end", () => {
-            controller.close();
-            // Cleanup after streaming finishes
-            try {
-              if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-              if (fs.existsSync(cookiePath)) fs.unlinkSync(cookiePath);
-            } catch (e) {}
-          });
-          fileStream.on("error", (err) => controller.error(err));
-        }
-      });
+    const outputFiles = fs.readdirSync(tempDir).filter(f => 
+      f.startsWith(`clip-${videoId}-${timestamp}`) && f.endsWith(".mp4")
+    );
+    
+    let finalOutputPath = outputPath;
+    if (!fs.existsSync(outputPath) && outputFiles.length > 0) {
+      finalOutputPath = path.join(tempDir, outputFiles[0]);
+    }
 
-      return new NextResponse(stream, {
+    if (ytdlpResult.success && fs.existsSync(finalOutputPath)) {
+      const stats = fs.statSync(finalOutputPath);
+      console.log(`[download-clip] Success! File size: ${stats.size} bytes`);
+      
+      const fileBuffer = fs.readFileSync(finalOutputPath);
+      
+      try {
+        fs.unlinkSync(finalOutputPath);
+        if (fs.existsSync(cookiePath)) fs.unlinkSync(cookiePath);
+      } catch (e) {}
+
+      return new NextResponse(fileBuffer, {
         headers: {
           "Content-Type": "video/mp4",
           "Content-Disposition": `attachment; filename="clip-${videoId}.mp4"`,
@@ -159,31 +146,19 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // 2. Fallback to RapidAPI + Buffer (Legacy/Local)
-    console.log(`[download-clip] yt-dlp failed or unavailable, trying fallback...`);
-    const streamData = await getVideoStreamUrl(videoId);
-    if (streamData?.videoUrl) {
-      const response = await fetch(streamData.videoUrl);
-      if (response.ok) {
-        const buffer = Buffer.from(await response.arrayBuffer());
-        return new NextResponse(buffer, {
-          headers: {
-            "Content-Type": "video/mp4",
-            "Content-Disposition": `attachment; filename="full-video-${videoId}.mp4"`,
-            "Content-Length": buffer.length.toString(),
-          }
-        });
-      }
-    }
+    console.error(`[download-clip] Failed: ${ytdlpResult.error}`);
+    return NextResponse.json({ 
+      error: "Download failed", 
+      details: ytdlpResult.error 
+    }, { status: 500 });
 
   } catch (error: any) {
     console.error("[download-clip] Error:", error);
+    return NextResponse.json({ error: error.message || "Download failed" }, { status: 500 });
   } finally {
     try {
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
       if (fs.existsSync(cookiePath)) fs.unlinkSync(cookiePath);
     } catch (e) {}
   }
-
-  return NextResponse.json({ error: "Download failed" }, { status: 500 });
 }
