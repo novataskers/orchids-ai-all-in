@@ -5,67 +5,75 @@ export const maxDuration = 300;
 async function getVideoStreamUrl(videoId: string): Promise<{ videoUrl: string; audioUrl?: string } | null> {
   const rapidApiKey = process.env.RAPIDAPI_KEY;
   
-  if (rapidApiKey) {
-    try {
-      const response = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
-        method: "GET",
-        headers: {
-          "x-rapidapi-key": rapidApiKey,
-          "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
-        }
-      });
+  console.log("[download-clip] RAPIDAPI_KEY present:", !!rapidApiKey);
+  
+  if (!rapidApiKey) {
+    console.log("[download-clip] No RAPIDAPI_KEY found!");
+    return null;
+  }
+
+  try {
+    console.log("[download-clip] Trying youtube-media-downloader API...");
+    const response = await fetch(`https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId=${videoId}`, {
+      method: "GET",
+      headers: {
+        "x-rapidapi-key": rapidApiKey,
+        "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com"
+      }
+    });
+    
+    console.log("[download-clip] youtube-media-downloader status:", response.status);
+    
+    if (response.ok) {
+      const data = await response.json();
+      console.log("[download-clip] Response keys:", Object.keys(data));
       
-      if (response.ok) {
-        const data = await response.json();
+      if (data.videos?.items) {
+        const mp4WithAudio = data.videos.items.find((v: any) => 
+          v.extension === "mp4" && v.hasAudio && v.url
+        );
         
-        if (data.status === "OK") {
-          const videoFormat = data.formats?.find((f: any) => 
-            f.mimeType?.includes("video/mp4") && f.qualityLabel && f.url
-          ) || data.adaptiveFormats?.find((f: any) => 
-            f.mimeType?.includes("video/mp4") && f.url
-          );
-          
-          const audioFormat = data.adaptiveFormats?.find((f: any) => 
-            f.mimeType?.includes("audio") && f.url
-          );
-          
-          if (videoFormat?.url) {
-            return { 
-              videoUrl: videoFormat.url,
-              audioUrl: audioFormat?.url
-            };
-          }
+        if (mp4WithAudio?.url) {
+          console.log("[download-clip] Found MP4 with audio:", mp4WithAudio.quality);
+          return { videoUrl: mp4WithAudio.url };
         }
       }
-    } catch (e) {
-      console.log("[download-clip] ytstream error:", e);
     }
+  } catch (e) {
+    console.log("[download-clip] youtube-media-downloader error:", e);
+  }
+
+  try {
+    console.log("[download-clip] Trying ytstream API...");
+    const response = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
+      method: "GET",
+      headers: {
+        "x-rapidapi-key": rapidApiKey,
+        "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
+      }
+    });
     
-    try {
-      const response = await fetch(`https://yt-api.p.rapidapi.com/dl?id=${videoId}`, {
-        method: "GET",
-        headers: {
-          "x-rapidapi-key": rapidApiKey,
-          "x-rapidapi-host": "yt-api.p.rapidapi.com"
-        }
-      });
+    console.log("[download-clip] ytstream status:", response.status);
+    
+    if (response.ok) {
+      const data = await response.json();
+      console.log("[download-clip] ytstream response status:", data.status);
       
-      if (response.ok) {
-        const data = await response.json();
-        
-        const videoFormat = data.formats?.find((f: any) => 
-          f.mimeType?.includes("video/mp4") && f.qualityLabel && f.url
-        ) || data.adaptiveFormats?.find((f: any) => 
+      if (data.status === "OK" && data.formats) {
+        const videoFormat = data.formats.find((f: any) => 
+          f.mimeType?.includes("video/mp4") && f.hasAudio && f.hasVideo && f.url
+        ) || data.formats.find((f: any) => 
           f.mimeType?.includes("video/mp4") && f.url
         );
         
         if (videoFormat?.url) {
+          console.log("[download-clip] Found ytstream format:", videoFormat.qualityLabel);
           return { videoUrl: videoFormat.url };
         }
       }
-    } catch (e) {
-      console.log("[download-clip] yt-api error:", e);
     }
+  } catch (e) {
+    console.log("[download-clip] ytstream error:", e);
   }
   
   return null;
