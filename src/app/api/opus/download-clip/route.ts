@@ -199,10 +199,10 @@ export async function GET(request: NextRequest) {
     youtubeUrl
   ];
 
-  const warpProxy = process.env.WARP_PROXY;
-  if (warpProxy) {
-    args.unshift("--proxy", warpProxy);
-    console.log(`[download-clip] Using WARP proxy: ${warpProxy}`);
+  const proxyUrl = process.env.BRIGHT_DATA_PROXY_URL || process.env.WARP_PROXY;
+  if (proxyUrl) {
+    args.unshift("--proxy", proxyUrl);
+    console.log(`[download-clip] Using proxy: ${proxyUrl.split('@')[1] || proxyUrl}`);
   }
 
   if (hasCookies && fs.existsSync(cookiePath)) {

@@ -286,7 +286,7 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
       }
     }
 
-  // Method 5: Try yt-dlp with Netscape cookies (last resort)
+  // Method 5: Try yt-dlp with Netscape cookies and proxy (last resort)
   try {
     console.log("[opus] Trying yt-dlp...");
     const tempDir = os.tmpdir();
@@ -307,10 +307,17 @@ async function downloadYouTubeAudio(videoId: string): Promise<Buffer> {
       }
     }
     
+    let proxyArg = "";
+    const proxyUrl = process.env.BRIGHT_DATA_PROXY_URL;
+    if (proxyUrl) {
+      proxyArg = `--proxy "${proxyUrl}"`;
+      console.log("[opus] Using Bright Data proxy for yt-dlp");
+    }
+    
     const ytDlpPath = process.platform === "win32" ? "yt-dlp" : "/usr/local/bin/yt-dlp";
     
     try {
-      const command = `${ytDlpPath} ${cookiesArg} -x --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${youtubeUrl}"`;
+      const command = `${ytDlpPath} ${proxyArg} ${cookiesArg} -x --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${youtubeUrl}"`;
       console.log(`[opus] Executing yt-dlp command...`);
       
       const { stdout, stderr } = await execAsync(command, { timeout: 120000 });
