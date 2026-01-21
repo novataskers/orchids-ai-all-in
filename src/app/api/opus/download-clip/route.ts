@@ -92,9 +92,17 @@ export async function GET(request: NextRequest) {
     "--force-keyframes-at-cuts",
     "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
     "--merge-output-format", "mp4",
+    "--retries", "3",
+    "--fragment-retries", "3",
     "-o", outputPath,
     youtubeUrl
   ];
+
+  const warpProxy = process.env.WARP_PROXY;
+  if (warpProxy) {
+    args.unshift("--proxy", warpProxy);
+    console.log(`[download-clip] Using WARP proxy: ${warpProxy}`);
+  }
 
   if (hasCookies && fs.existsSync(cookiePath)) {
     args.unshift("--cookies", cookiePath);
