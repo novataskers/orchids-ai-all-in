@@ -90,6 +90,7 @@ export default function OpusPage() {
   const [aspectRatio, setAspectRatio] = useState<"9:16" | "16:9">("9:16");
   const [addCaptions, setAddCaptions] = useState(true);
   const [captionStyle, setCaptionStyle] = useState<"classic" | "bold" | "outline" | "glow">("bold");
+  const [downloadingClipId, setDownloadingClipId] = useState<number | null>(null);
 
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -574,15 +575,48 @@ export default function OpusPage() {
                                 <Youtube className="h-3.5 w-3.5" />
                                 Watch on YouTube
                               </a>
-                              {clip.cobaltUrl && (
-                                <a
-                                  href={clip.cobaltUrl}
-                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-mono hover:bg-purple-500 transition-colors"
-                                >
-                                  <Download className="h-3.5 w-3.5" />
-                                  Download
-                                </a>
-                              )}
+                              {videoId && (
+                                  <button
+                                    disabled={downloadingClipId === clip.id}
+                                    onClick={async () => {
+                                      setDownloadingClipId(clip.id);
+                                      const downloadUrl = `/api/opus/download-clip?videoId=${videoId}&start=${Math.floor(clip.start)}&end=${Math.floor(clip.end)}`;
+                                      try {
+                                        const res = await fetch(downloadUrl);
+                                        const contentType = res.headers.get("content-type") || "";
+                                        
+                                        if (contentType.includes("video")) {
+                                          const blob = await res.blob();
+                                          const url = URL.createObjectURL(blob);
+                                          const a = document.createElement("a");
+                                          a.href = url;
+                                          a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
+                                          a.click();
+                                          URL.revokeObjectURL(url);
+                                        } else {
+                                          const data = await res.json();
+                                          if (data.youtubeUrl) {
+                                            window.open(data.youtubeUrl, "_blank");
+                                            alert(`YouTube is blocking direct downloads.\n\nTo download this clip:\n1. Install yt-dlp: https://github.com/yt-dlp/yt-dlp\n2. Run: yt-dlp --download-sections "*${Math.floor(clip.start)}-${Math.floor(clip.end)}" "${data.youtubeUrl}"`);
+                                          }
+                                        }
+                                      } catch (err) {
+                                        console.error("Download error:", err);
+                                        window.open(youtubeWatchUrl, "_blank");
+                                      } finally {
+                                        setDownloadingClipId(null);
+                                      }
+                                    }}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-mono hover:bg-purple-500 transition-colors disabled:opacity-50"
+                                  >
+                                    {downloadingClipId === clip.id ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <Download className="h-3.5 w-3.5" />
+                                    )}
+                                    {downloadingClipId === clip.id ? "Downloading..." : "Download"}
+                                  </button>
+                                )}
                             </div>
                           </div>
                         </div>

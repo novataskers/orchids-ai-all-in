@@ -2,44 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const maxDuration = 300;
 
-function parseCookies(): string {
-  try {
-    const cookiesJson = process.env.YOUTUBE_COOKIES;
-    if (!cookiesJson) return "";
-    
-    const cookies = JSON.parse(cookiesJson);
-    return cookies
-      .map((c: any) => `${c.name}=${c.value}`)
-      .join("; ");
-  } catch {
-    return "";
-  }
-}
-
-async function getYouTubeVideoInfo(videoId: string, cookieString: string) {
-  const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.5",
-      "Cookie": cookieString,
-    }
-  });
-  
-  const html = await response.text();
-  
-  const playerResponseMatch = html.match(/var ytInitialPlayerResponse\s*=\s*({.+?});/s);
-  if (!playerResponseMatch) {
-    const configMatch = html.match(/ytInitialPlayerResponse"\s*:\s*({.+?})\s*,\s*"/s);
-    if (configMatch) {
-      return JSON.parse(configMatch[1]);
-    }
-    throw new Error("Could not find player response");
-  }
-  
-  return JSON.parse(playerResponseMatch[1]);
-}
-
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -55,46 +17,73 @@ export async function GET(request: NextRequest) {
     }
 
     const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const cookieString = parseCookies();
+    const startSec = parseInt(start);
+    const endSec = parseInt(end);
     
-    console.log("[download-clip] Cookie available:", cookieString.length > 0);
+    console.log(`[download-clip] Downloading clip from ${youtubeUrl} (${startSec}s - ${endSec}s)`);
 
-    // Try direct YouTube extraction with cookies
-    if (cookieString) {
-      try {
-        console.log("[download-clip] Trying direct YouTube extraction with cookies...");
-        const playerResponse = await getYouTubeVideoInfo(videoId, cookieString);
+    // Try cobalt-api package
+    try {
+      console.log("[download-clip] Trying Cobalt API...");
+      const CobaltAPI = (await import("cobalt-api")).default;
+      const cobalt = new CobaltAPI(youtubeUrl);
+      cobalt.setQuality("720");
+      
+      const result = await cobalt.sendRequest();
+      console.log("[download-clip] Cobalt result:", JSON.stringify(result).slice(0, 300));
+      
+      if (result.status === "stream" || result.status === "redirect") {
+        const videoUrl = result.url;
+        console.log("[download-clip] Got video URL from Cobalt");
         
-        if (playerResponse.streamingData) {
-          const { formats, adaptiveFormats } = playerResponse.streamingData;
+        const videoResponse = await fetch(videoUrl);
+        if (videoResponse.ok) {
+          const videoBuffer = await videoResponse.arrayBuffer();
+          console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
           
-          // Look for combined format (video + audio)
-          const allFormats = [...(formats || []), ...(adaptiveFormats || [])];
+          return new NextResponse(videoBuffer, {
+            headers: {
+              "Content-Type": "video/mp4",
+              "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
+              "Content-Length": videoBuffer.byteLength.toString(),
+            }
+          });
+        }
+      }
+    } catch (cobaltError) {
+      console.log("[download-clip] Cobalt error:", cobaltError);
+    }
+
+    // Try direct Cobalt API endpoints
+    const cobaltEndpoints = [
+      "https://api.cobalt.tools",
+      "https://co.wuk.sh",
+    ];
+    
+    for (const endpoint of cobaltEndpoints) {
+      try {
+        console.log(`[download-clip] Trying Cobalt endpoint: ${endpoint}`);
+        const response = await fetch(`${endpoint}/api/json`, {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url: youtubeUrl,
+            vCodec: "h264",
+            vQuality: "720",
+            aFormat: "mp3",
+          })
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          console.log("[download-clip] Direct Cobalt response:", JSON.stringify(data).slice(0, 300));
           
-          // Prefer formats with both video and audio
-          let selectedFormat = allFormats.find(
-            (f: any) => f.mimeType?.includes("video/mp4") && f.audioQuality && f.url
-          );
-          
-          // Fallback to any mp4 with URL
-          if (!selectedFormat) {
-            selectedFormat = allFormats.find(
-              (f: any) => f.mimeType?.includes("video/mp4") && f.url
-            );
-          }
-          
-          if (selectedFormat?.url) {
-            console.log("[download-clip] Found format:", selectedFormat.qualityLabel || selectedFormat.quality);
-            
-            const videoResponse = await fetch(selectedFormat.url, {
-              headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Cookie": cookieString,
-                "Range": "bytes=0-",
-              }
-            });
-            
-            if (videoResponse.ok || videoResponse.status === 206) {
+          if (data.url) {
+            const videoResponse = await fetch(data.url);
+            if (videoResponse.ok) {
               const videoBuffer = await videoResponse.arrayBuffer();
               console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
               
@@ -106,24 +95,14 @@ export async function GET(request: NextRequest) {
                 }
               });
             }
-            console.log("[download-clip] Video fetch failed:", videoResponse.status);
-          }
-          
-          // Try signatureCipher formats (need to decode)
-          const cipherFormat = allFormats.find(
-            (f: any) => f.mimeType?.includes("video/mp4") && f.signatureCipher
-          );
-          
-          if (cipherFormat?.signatureCipher) {
-            console.log("[download-clip] Found cipher format, but decoding not implemented");
           }
         }
       } catch (e) {
-        console.log("[download-clip] Direct extraction error:", e);
+        console.log(`[download-clip] Cobalt ${endpoint} error:`, e);
       }
     }
 
-    // Try ytstream API
+    // Fallback to RapidAPI ytstream
     if (process.env.RAPIDAPI_KEY) {
       try {
         console.log("[download-clip] Trying ytstream API...");
@@ -146,11 +125,7 @@ export async function GET(request: NextRequest) {
             
             if (mp4Format?.url) {
               console.log("[download-clip] Found ytstream format:", mp4Format.qualityLabel);
-              const videoResponse = await fetch(mp4Format.url, {
-                headers: {
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                }
-              });
+              const videoResponse = await fetch(mp4Format.url);
               
               if (videoResponse.ok) {
                 const videoBuffer = await videoResponse.arrayBuffer();
@@ -172,47 +147,6 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Try yt-api API
-    if (process.env.RAPIDAPI_KEY) {
-      try {
-        console.log("[download-clip] Trying yt-api...");
-        const response = await fetch(`https://yt-api.p.rapidapi.com/dl?id=${videoId}`, {
-          method: "GET",
-          headers: {
-            "x-rapidapi-key": process.env.RAPIDAPI_KEY,
-            "x-rapidapi-host": "yt-api.p.rapidapi.com"
-          }
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          console.log("[download-clip] yt-api response:", JSON.stringify(data).slice(0, 300));
-          
-          if (data.formats) {
-            const mp4Format = data.formats.find((f: any) => 
-              f.mimeType?.includes("video/mp4") && f.url
-            );
-            
-            if (mp4Format?.url) {
-              const videoResponse = await fetch(mp4Format.url);
-              if (videoResponse.ok) {
-                const videoBuffer = await videoResponse.arrayBuffer();
-                return new NextResponse(videoBuffer, {
-                  headers: {
-                    "Content-Type": "video/mp4",
-                    "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
-                    "Content-Length": videoBuffer.byteLength.toString(),
-                  }
-                });
-              }
-            }
-          }
-        }
-      } catch (e) {
-        console.log("[download-clip] yt-api error:", e);
-      }
-    }
-
     // All methods failed
     return NextResponse.json({
       error: "YouTube download services are currently unavailable.",
@@ -221,21 +155,29 @@ export async function GET(request: NextRequest) {
         videoId,
         startTime: start,
         endTime: end,
-        duration: `${parseInt(end) - parseInt(start)} seconds`
+        duration: `${endSec - startSec} seconds`
       },
       instructions: [
-        "1. Click the YouTube link above to open the video",
-        "2. Use a browser extension like 'Video DownloadHelper' to download",
-        "3. Or use yt-dlp on your computer: yt-dlp -f mp4 " + youtubeUrl,
-        `4. Trim the video from ${start}s to ${end}s using any video editor`
+        "1. Install yt-dlp on your computer: https://github.com/yt-dlp/yt-dlp",
+        `2. Run: yt-dlp --download-sections "*${start}-${end}" "${youtubeUrl}"`,
+        "3. Or use a browser extension like 'Video DownloadHelper'",
       ]
     }, { status: 503 });
     
   } catch (error) {
     console.error("Download clip error:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to download clip" },
-      { status: 500 }
-    );
+    
+    const { searchParams } = new URL(request.url);
+    const videoId = searchParams.get("videoId") || "";
+    const start = searchParams.get("start") || "0";
+    const end = searchParams.get("end") || "0";
+    
+    return NextResponse.json({
+      error: "YouTube download failed.",
+      youtubeUrl: `https://www.youtube.com/watch?v=${videoId}&t=${start}`,
+      instructions: [
+        `1. Use yt-dlp: yt-dlp --download-sections "*${start}-${end}" "https://www.youtube.com/watch?v=${videoId}"`,
+      ]
+    }, { status: 503 });
   }
 }
