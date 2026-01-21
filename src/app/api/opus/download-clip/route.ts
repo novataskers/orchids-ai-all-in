@@ -2,6 +2,84 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const maxDuration = 300;
 
+async function tryDownloadFromRapidAPI(videoId: string): Promise<ArrayBuffer | null> {
+  if (!process.env.RAPIDAPI_KEY) {
+    console.log("[download-clip] No RAPIDAPI_KEY");
+    return null;
+  }
+  
+  try {
+    console.log("[download-clip] Trying ytstream API...");
+    
+    const response = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
+      headers: {
+        "x-rapidapi-key": process.env.RAPIDAPI_KEY,
+        "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
+      }
+    });
+    
+    if (!response.ok) {
+      console.log("[download-clip] ytstream returned status", response.status);
+      return null;
+    }
+    
+    const data = await response.json();
+    console.log("[download-clip] ytstream status:", data.status);
+    
+    if (data.status !== "OK") {
+      console.log("[download-clip] ytstream error:", data);
+      return null;
+    }
+    
+    let downloadUrl: string | null = null;
+    let qualityLabel = "";
+    
+    // First, try the formats array which has combined audio+video
+    if (data.formats && data.formats.length > 0) {
+      const mp4 = data.formats.find((f: any) => 
+        f.mimeType && f.mimeType.includes("video/mp4") && f.url
+      );
+      
+      if (mp4) {
+        downloadUrl = mp4.url;
+        qualityLabel = mp4.qualityLabel || "unknown";
+        console.log("[download-clip] Found combined format:", qualityLabel);
+      }
+    }
+    
+    if (!downloadUrl) {
+      console.log("[download-clip] No combined format found");
+      return null;
+    }
+    
+    console.log("[download-clip] Downloading from URL...");
+    const videoResponse = await fetch(downloadUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      }
+    });
+    
+    if (!videoResponse.ok) {
+      console.log("[download-clip] Video download failed:", videoResponse.status);
+      return null;
+    }
+    
+    const buffer = await videoResponse.arrayBuffer();
+    console.log(`[download-clip] Downloaded ${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB (${qualityLabel})`);
+    
+    if (buffer.byteLength < 10000) {
+      console.log("[download-clip] Downloaded file too small, probably an error");
+      return null;
+    }
+    
+    return buffer;
+    
+  } catch (e) {
+    console.log("[download-clip] ytstream error:", e);
+    return null;
+  }
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -20,134 +98,23 @@ export async function GET(request: NextRequest) {
     const startSec = parseInt(start);
     const endSec = parseInt(end);
     
-    console.log(`[download-clip] Downloading clip from ${youtubeUrl} (${startSec}s - ${endSec}s)`);
+    console.log(`[download-clip] Request for ${youtubeUrl} (${startSec}s - ${endSec}s)`);
+    console.log(`[download-clip] RAPIDAPI_KEY present: ${!!process.env.RAPIDAPI_KEY}`);
 
-    // Try cobalt-api package
-    try {
-      console.log("[download-clip] Trying Cobalt API...");
-      const CobaltAPI = (await import("cobalt-api")).default;
-      const cobalt = new CobaltAPI(youtubeUrl);
-      cobalt.setQuality("720");
-      
-      const result = await cobalt.sendRequest();
-      console.log("[download-clip] Cobalt result:", JSON.stringify(result).slice(0, 300));
-      
-      if (result.status === "stream" || result.status === "redirect") {
-        const videoUrl = result.url;
-        console.log("[download-clip] Got video URL from Cobalt");
-        
-        const videoResponse = await fetch(videoUrl);
-        if (videoResponse.ok) {
-          const videoBuffer = await videoResponse.arrayBuffer();
-          console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
-          
-          return new NextResponse(videoBuffer, {
-            headers: {
-              "Content-Type": "video/mp4",
-              "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
-              "Content-Length": videoBuffer.byteLength.toString(),
-            }
-          });
-        }
-      }
-    } catch (cobaltError) {
-      console.log("[download-clip] Cobalt error:", cobaltError);
-    }
-
-    // Try direct Cobalt API endpoints
-    const cobaltEndpoints = [
-      "https://api.cobalt.tools",
-      "https://co.wuk.sh",
-    ];
+    const videoBuffer = await tryDownloadFromRapidAPI(videoId);
     
-    for (const endpoint of cobaltEndpoints) {
-      try {
-        console.log(`[download-clip] Trying Cobalt endpoint: ${endpoint}`);
-        const response = await fetch(`${endpoint}/api/json`, {
-          method: "POST",
-          headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            url: youtubeUrl,
-            vCodec: "h264",
-            vQuality: "720",
-            aFormat: "mp3",
-          })
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          console.log("[download-clip] Direct Cobalt response:", JSON.stringify(data).slice(0, 300));
-          
-          if (data.url) {
-            const videoResponse = await fetch(data.url);
-            if (videoResponse.ok) {
-              const videoBuffer = await videoResponse.arrayBuffer();
-              console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
-              
-              return new NextResponse(videoBuffer, {
-                headers: {
-                  "Content-Type": "video/mp4",
-                  "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
-                  "Content-Length": videoBuffer.byteLength.toString(),
-                }
-              });
-            }
-          }
+    if (videoBuffer) {
+      console.log("[download-clip] Success! Returning video...");
+      return new NextResponse(videoBuffer, {
+        headers: {
+          "Content-Type": "video/mp4",
+          "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
+          "Content-Length": videoBuffer.byteLength.toString(),
         }
-      } catch (e) {
-        console.log(`[download-clip] Cobalt ${endpoint} error:`, e);
-      }
+      });
     }
 
-    // Fallback to RapidAPI ytstream
-    if (process.env.RAPIDAPI_KEY) {
-      try {
-        console.log("[download-clip] Trying ytstream API...");
-        const response = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
-          method: "GET",
-          headers: {
-            "x-rapidapi-key": process.env.RAPIDAPI_KEY,
-            "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
-          }
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          console.log("[download-clip] ytstream response status:", data.status);
-          
-          if (data.formats && Array.isArray(data.formats)) {
-            const mp4Format = data.formats
-              .filter((f: any) => f.mimeType?.includes("video/mp4") && f.hasAudio && f.hasVideo)
-              .sort((a: any, b: any) => (b.contentLength || 0) - (a.contentLength || 0))[0];
-            
-            if (mp4Format?.url) {
-              console.log("[download-clip] Found ytstream format:", mp4Format.qualityLabel);
-              const videoResponse = await fetch(mp4Format.url);
-              
-              if (videoResponse.ok) {
-                const videoBuffer = await videoResponse.arrayBuffer();
-                console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
-                
-                return new NextResponse(videoBuffer, {
-                  headers: {
-                    "Content-Type": "video/mp4",
-                    "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
-                    "Content-Length": videoBuffer.byteLength.toString(),
-                  }
-                });
-              }
-            }
-          }
-        }
-      } catch (e) {
-        console.log("[download-clip] ytstream error:", e);
-      }
-    }
-
-    // All methods failed
+    console.log("[download-clip] All methods failed, returning fallback");
     return NextResponse.json({
       error: "YouTube download services are currently unavailable.",
       youtubeUrl: `${youtubeUrl}&t=${start}`,
@@ -165,7 +132,7 @@ export async function GET(request: NextRequest) {
     }, { status: 503 });
     
   } catch (error) {
-    console.error("Download clip error:", error);
+    console.error("[download-clip] Error:", error);
     
     const { searchParams } = new URL(request.url);
     const videoId = searchParams.get("videoId") || "";
