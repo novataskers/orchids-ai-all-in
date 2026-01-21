@@ -575,48 +575,46 @@ export default function OpusPage() {
                                 <Youtube className="h-3.5 w-3.5" />
                                 Watch on YouTube
                               </a>
-                              {videoId && (
-                                  <button
-                                    disabled={downloadingClipId === clip.id}
-                                    onClick={async () => {
-                                      setDownloadingClipId(clip.id);
-                                      const downloadUrl = `/api/opus/download-clip?videoId=${videoId}&start=${Math.floor(clip.start)}&end=${Math.floor(clip.end)}`;
-                                      try {
-                                        const res = await fetch(downloadUrl);
-                                        const contentType = res.headers.get("content-type") || "";
-                                        
-                                        if (contentType.includes("video")) {
-                                          const blob = await res.blob();
-                                          const url = URL.createObjectURL(blob);
-                                          const a = document.createElement("a");
-                                          a.href = url;
-                                          a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
-                                          a.click();
-                                          URL.revokeObjectURL(url);
-                                        } else {
-                                          const data = await res.json();
-                                          if (data.youtubeUrl) {
-                                            window.open(data.youtubeUrl, "_blank");
-                                            alert(`YouTube is blocking direct downloads.\n\nTo download this clip:\n1. Install yt-dlp: https://github.com/yt-dlp/yt-dlp\n2. Run: yt-dlp --download-sections "*${Math.floor(clip.start)}-${Math.floor(clip.end)}" "${data.youtubeUrl}"`);
+                                {videoId && (
+                                    <button
+                                      disabled={downloadingClipId === clip.id}
+                                      onClick={async () => {
+                                        setDownloadingClipId(clip.id);
+                                        const downloadUrl = `/api/opus/download-clip?videoId=${videoId}&start=${Math.floor(clip.start)}&end=${Math.floor(clip.end)}`;
+                                        try {
+                                          const res = await fetch(downloadUrl);
+                                          const contentType = res.headers.get("content-type") || "";
+                                          
+                                          if (contentType.includes("video")) {
+                                            const blob = await res.blob();
+                                            const url = URL.createObjectURL(blob);
+                                            const a = document.createElement("a");
+                                            a.href = url;
+                                            a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
+                                            document.body.appendChild(a);
+                                            a.click();
+                                            document.body.removeChild(a);
+                                            URL.revokeObjectURL(url);
+                                          } else {
+                                            alert("Download temporarily unavailable. Please try again in a few moments.");
                                           }
+                                        } catch (err) {
+                                          console.error("Download error:", err);
+                                          alert("Download failed. Please try again.");
+                                        } finally {
+                                          setDownloadingClipId(null);
                                         }
-                                      } catch (err) {
-                                        console.error("Download error:", err);
-                                        window.open(youtubeWatchUrl, "_blank");
-                                      } finally {
-                                        setDownloadingClipId(null);
-                                      }
-                                    }}
-                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-mono hover:bg-purple-500 transition-colors disabled:opacity-50"
-                                  >
-                                    {downloadingClipId === clip.id ? (
-                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    ) : (
-                                      <Download className="h-3.5 w-3.5" />
-                                    )}
-                                    {downloadingClipId === clip.id ? "Downloading..." : "Download"}
-                                  </button>
-                                )}
+                                      }}
+                                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-mono hover:bg-purple-500 transition-colors disabled:opacity-50"
+                                    >
+                                      {downloadingClipId === clip.id ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                      ) : (
+                                        <Download className="h-3.5 w-3.5" />
+                                      )}
+                                      {downloadingClipId === clip.id ? "Downloading..." : "Download"}
+                                    </button>
+                                  )}
                             </div>
                           </div>
                         </div>

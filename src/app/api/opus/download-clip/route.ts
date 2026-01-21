@@ -1,60 +1,94 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exec } from "child_process";
-import { promisify } from "util";
-import * as fs from "fs";
-import * as path from "path";
-import * as os from "os";
-
-const execAsync = promisify(exec);
 
 export const maxDuration = 300;
 
-async function downloadWithYtDlp(videoId: string, start: number, end: number): Promise<Buffer | null> {
-  const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-  const tempDir = path.join(os.tmpdir(), `clip-${videoId}-${Date.now()}`);
-  const outputTemplate = path.join(tempDir, `clip.%(ext)s`);
+async function getVideoStreamUrl(videoId: string): Promise<{ videoUrl: string; audioUrl?: string } | null> {
+  const rapidApiKey = process.env.RAPIDAPI_KEY;
   
+  if (rapidApiKey) {
+    try {
+      const response = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
+        method: "GET",
+        headers: {
+          "x-rapidapi-key": rapidApiKey,
+          "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
+        }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        
+        if (data.status === "OK") {
+          const videoFormat = data.formats?.find((f: any) => 
+            f.mimeType?.includes("video/mp4") && f.qualityLabel && f.url
+          ) || data.adaptiveFormats?.find((f: any) => 
+            f.mimeType?.includes("video/mp4") && f.url
+          );
+          
+          const audioFormat = data.adaptiveFormats?.find((f: any) => 
+            f.mimeType?.includes("audio") && f.url
+          );
+          
+          if (videoFormat?.url) {
+            return { 
+              videoUrl: videoFormat.url,
+              audioUrl: audioFormat?.url
+            };
+          }
+        }
+      }
+    } catch (e) {
+      console.log("[download-clip] ytstream error:", e);
+    }
+    
+    try {
+      const response = await fetch(`https://yt-api.p.rapidapi.com/dl?id=${videoId}`, {
+        method: "GET",
+        headers: {
+          "x-rapidapi-key": rapidApiKey,
+          "x-rapidapi-host": "yt-api.p.rapidapi.com"
+        }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        
+        const videoFormat = data.formats?.find((f: any) => 
+          f.mimeType?.includes("video/mp4") && f.qualityLabel && f.url
+        ) || data.adaptiveFormats?.find((f: any) => 
+          f.mimeType?.includes("video/mp4") && f.url
+        );
+        
+        if (videoFormat?.url) {
+          return { videoUrl: videoFormat.url };
+        }
+      }
+    } catch (e) {
+      console.log("[download-clip] yt-api error:", e);
+    }
+  }
+  
+  return null;
+}
+
+async function downloadVideoBuffer(url: string): Promise<Buffer | null> {
   try {
-    fs.mkdirSync(tempDir, { recursive: true });
-    
-    // Use yt-dlp with download-sections to trim the video
-    const command = `yt-dlp --download-sections "*${start}-${end}" --force-keyframes-at-cuts -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best" --merge-output-format mp4 -o "${outputTemplate}" --no-playlist "${youtubeUrl}"`;
-    
-    console.log(`[download-clip] Running: ${command}`);
-    
-    const { stdout, stderr } = await execAsync(command, { 
-      timeout: 120000,
-      maxBuffer: 50 * 1024 * 1024 
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "*/*",
+        "Range": "bytes=0-",
+      }
     });
     
-    console.log("[download-clip] yt-dlp stdout:", stdout.slice(-500));
-    if (stderr) console.log("[download-clip] yt-dlp stderr:", stderr.slice(-500));
-    
-    // Find the output file
-    const files = fs.readdirSync(tempDir);
-    const videoFile = files.find(f => f.endsWith('.mp4') || f.endsWith('.webm') || f.endsWith('.mkv'));
-    
-    if (videoFile) {
-      const filePath = path.join(tempDir, videoFile);
-      const buffer = fs.readFileSync(filePath);
-      console.log(`[download-clip] Success! File size: ${(buffer.length / 1024 / 1024).toFixed(2)} MB`);
-      
-      // Cleanup
-      fs.rmSync(tempDir, { recursive: true, force: true });
-      return buffer;
+    if (response.ok || response.status === 206) {
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer);
     }
-    
-    console.log("[download-clip] No video file found in temp dir");
-    fs.rmSync(tempDir, { recursive: true, force: true });
-    return null;
-    
-  } catch (error: any) {
-    console.error("[download-clip] yt-dlp error:", error.message);
-    if (fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-    return null;
+  } catch (e) {
+    console.log("[download-clip] Download error:", e);
   }
+  return null;
 }
 
 export async function GET(request: NextRequest) {
@@ -76,32 +110,34 @@ export async function GET(request: NextRequest) {
   
   console.log(`[download-clip] Request: ${youtubeUrl} (${startSec}s - ${endSec}s)`);
 
-  // Try yt-dlp (works on Railway, localhost with yt-dlp installed)
-  const videoBuffer = await downloadWithYtDlp(videoId, startSec, endSec);
+  const streamData = await getVideoStreamUrl(videoId);
   
-  if (videoBuffer) {
-    return new NextResponse(videoBuffer, {
-      headers: {
-        "Content-Type": "video/mp4",
-        "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
-        "Content-Length": videoBuffer.length.toString(),
-      }
-    });
+  if (streamData?.videoUrl) {
+    console.log(`[download-clip] Got video stream URL, downloading full video...`);
+    
+    const videoBuffer = await downloadVideoBuffer(streamData.videoUrl);
+    
+    if (videoBuffer && videoBuffer.length > 10000) {
+      console.log(`[download-clip] Downloaded ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+      
+      return new NextResponse(videoBuffer, {
+        headers: {
+          "Content-Type": "video/mp4",
+          "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
+          "Content-Length": videoBuffer.length.toString(),
+        }
+      });
+    }
   }
 
-  // Fallback - return instructions
   return NextResponse.json({
-    error: "yt-dlp not available on this server. Deploy to Railway for full functionality.",
+    error: "Could not download video. Please try again later.",
     youtubeUrl: `${youtubeUrl}&t=${start}`,
     clipInfo: {
       videoId,
       startTime: start,
       endTime: end,
       duration: `${endSec - startSec} seconds`
-    },
-    instructions: [
-      "1. Install yt-dlp: https://github.com/yt-dlp/yt-dlp",
-      `2. Run: yt-dlp --download-sections "*${start}-${end}" "${youtubeUrl}"`,
-    ]
+    }
   }, { status: 503 });
 }
