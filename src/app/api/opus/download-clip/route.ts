@@ -4,6 +4,107 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 
+async function downloadWithRapidAPI(videoId: string, startSec: number, endSec: number): Promise<Buffer | null> {
+  const rapidApiKey = process.env.RAPIDAPI_KEY;
+  if (!rapidApiKey) {
+    console.log("[download-clip] No RAPIDAPI_KEY found");
+    return null;
+  }
+
+  try {
+    console.log("[download-clip] Trying RapidAPI fallback...");
+    
+    const infoRes = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
+      headers: {
+        "x-rapidapi-key": rapidApiKey,
+        "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
+      }
+    });
+
+    if (!infoRes.ok) {
+      console.log(`[download-clip] RapidAPI info failed: ${infoRes.status}`);
+      return null;
+    }
+
+    const info = await infoRes.json();
+    
+    let downloadUrl = null;
+    if (info.formats) {
+      const mp4Format = info.formats.find((f: any) => 
+        f.mimeType?.includes("video/mp4") && f.hasAudio && f.hasVideo
+      ) || info.formats.find((f: any) => f.mimeType?.includes("video/mp4"));
+      
+      if (mp4Format?.url) {
+        downloadUrl = mp4Format.url;
+      }
+    }
+    
+    if (!downloadUrl && info.adaptiveFormats) {
+      const videoFormat = info.adaptiveFormats.find((f: any) => 
+        f.mimeType?.includes("video/mp4") && f.qualityLabel
+      );
+      if (videoFormat?.url) {
+        downloadUrl = videoFormat.url;
+      }
+    }
+
+    if (!downloadUrl) {
+      console.log("[download-clip] No suitable format found in RapidAPI response");
+      return null;
+    }
+
+    console.log("[download-clip] Downloading full video from RapidAPI...");
+    const videoRes = await fetch(downloadUrl);
+    if (!videoRes.ok) {
+      console.log(`[download-clip] Video download failed: ${videoRes.status}`);
+      return null;
+    }
+
+    const fullVideoBuffer = Buffer.from(await videoRes.arrayBuffer());
+    console.log(`[download-clip] Downloaded ${fullVideoBuffer.length} bytes, now trimming...`);
+
+    const tempDir = os.tmpdir();
+    const timestamp = Date.now();
+    const inputPath = path.join(tempDir, `full-${videoId}-${timestamp}.mp4`);
+    const outputPath = path.join(tempDir, `trimmed-${videoId}-${timestamp}.mp4`);
+
+    fs.writeFileSync(inputPath, fullVideoBuffer);
+
+    const ffmpegResult = await new Promise<boolean>((resolve) => {
+      const ffmpeg = spawn("ffmpeg", [
+        "-y",
+        "-ss", startSec.toString(),
+        "-i", inputPath,
+        "-t", (endSec - startSec).toString(),
+        "-c", "copy",
+        "-avoid_negative_ts", "1",
+        outputPath
+      ], { timeout: 60000 });
+
+      ffmpeg.on("close", (code) => {
+        resolve(code === 0);
+      });
+      ffmpeg.on("error", () => resolve(false));
+    });
+
+    try { fs.unlinkSync(inputPath); } catch {}
+
+    if (ffmpegResult && fs.existsSync(outputPath)) {
+      const trimmedBuffer = fs.readFileSync(outputPath);
+      try { fs.unlinkSync(outputPath); } catch {}
+      console.log(`[download-clip] RapidAPI + ffmpeg trim successful: ${trimmedBuffer.length} bytes`);
+      return trimmedBuffer;
+    }
+
+    console.log("[download-clip] ffmpeg trim failed, returning full video");
+    return fullVideoBuffer;
+
+  } catch (err: any) {
+    console.error("[download-clip] RapidAPI error:", err.message);
+    return null;
+  }
+}
+
 export const maxDuration = 300;
 
 function formatTime(seconds: number): string {
@@ -176,13 +277,24 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    console.log(`[download-clip] yt-dlp failed. Success: ${ytdlpResult.success}, File exists: ${!!finalOutput}`);
-    console.log(`[download-clip] Error: ${ytdlpResult.error.slice(0, 500)}`);
-    
-    return NextResponse.json({ 
-      error: "Download failed. YouTube may be blocking this request.", 
-      details: ytdlpResult.error.slice(0, 200)
-    }, { status: 500 });
+      console.log(`[download-clip] yt-dlp failed. Success: ${ytdlpResult.success}, File exists: ${!!finalOutput}`);
+      console.log(`[download-clip] Error: ${ytdlpResult.error.slice(0, 500)}`);
+      
+      const rapidApiBuffer = await downloadWithRapidAPI(videoId, startSec, endSec);
+      if (rapidApiBuffer) {
+        return new NextResponse(rapidApiBuffer, {
+          headers: {
+            "Content-Type": "video/mp4",
+            "Content-Disposition": `attachment; filename="clip-${videoId}.mp4"`,
+            "Content-Length": rapidApiBuffer.length.toString(),
+          }
+        });
+      }
+      
+      return NextResponse.json({ 
+        error: "Download failed. YouTube may be blocking this request.", 
+        details: ytdlpResult.error.slice(0, 200)
+      }, { status: 500 });
 
   } catch (err: any) {
     console.error(`[download-clip] Exception:`, err);
