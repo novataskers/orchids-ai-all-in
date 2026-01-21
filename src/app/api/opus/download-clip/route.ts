@@ -17,110 +17,155 @@ export async function GET(request: NextRequest) {
     }
 
     const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    let downloadUrl: string | null = null;
-    let contentType = "video/mp4";
-
-    // Method 1: Try ytstream RapidAPI for video
+    
+    // Try youtube-video-download-info API which provides working download links
     if (process.env.RAPIDAPI_KEY) {
       try {
-        console.log("[download-clip] Trying ytstream API...");
-        const response = await fetch(`https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${videoId}`, {
+        console.log("[download-clip] Trying youtube-video-download-info API...");
+        const response = await fetch(`https://youtube-video-download-info.p.rapidapi.com/dl?id=${videoId}`, {
           method: "GET",
           headers: {
             "x-rapidapi-key": process.env.RAPIDAPI_KEY,
-            "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com"
+            "x-rapidapi-host": "youtube-video-download-info.p.rapidapi.com"
           }
         });
         
         if (response.ok) {
           const data = await response.json();
+          console.log("[download-clip] API response:", JSON.stringify(data).slice(0, 500));
           
-          if (data.status === "OK" && data.formats) {
-            const videoFormat = data.formats.find((f: any) => 
-              f.mimeType?.includes("video/mp4") && f.qualityLabel && f.url
-            );
-            
-            if (videoFormat?.url) {
-              console.log(`[download-clip] Got video URL from ytstream: ${videoFormat.qualityLabel}`);
-              downloadUrl = videoFormat.url;
-              contentType = videoFormat.mimeType?.split(";")[0] || "video/mp4";
+          if (data.link) {
+            // This API returns direct download links
+            for (const format of data.link) {
+              if (format[0]?.includes("mp4") && format[1]) {
+                console.log("[download-clip] Found direct link, proxying...");
+                const videoResponse = await fetch(format[1], {
+                  headers: {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                  }
+                });
+                
+                if (videoResponse.ok) {
+                  const videoBuffer = await videoResponse.arrayBuffer();
+                  console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+                  
+                  return new NextResponse(videoBuffer, {
+                    headers: {
+                      "Content-Type": "video/mp4",
+                      "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
+                      "Content-Length": videoBuffer.byteLength.toString(),
+                    }
+                  });
+                }
+              }
             }
           }
         }
       } catch (e) {
-        console.log("[download-clip] ytstream error:", e);
+        console.log("[download-clip] youtube-video-download-info error:", e);
       }
     }
 
-    // Method 2: Try yt-api
-    if (!downloadUrl && process.env.RAPIDAPI_KEY) {
+    // Try SaveFrom-style API
+    if (process.env.RAPIDAPI_KEY) {
       try {
-        console.log("[download-clip] Trying yt-api for video...");
-        const response = await fetch(`https://yt-api.p.rapidapi.com/dl?id=${videoId}`, {
+        console.log("[download-clip] Trying savefrom API...");
+        const response = await fetch("https://savefrom-anywhere-link-video-image-downloader.p.rapidapi.com/savefrom.php", {
+          method: "POST",
+          headers: {
+            "x-rapidapi-key": process.env.RAPIDAPI_KEY,
+            "x-rapidapi-host": "savefrom-anywhere-link-video-image-downloader.p.rapidapi.com",
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body: `url=${encodeURIComponent(youtubeUrl)}`
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          console.log("[download-clip] SaveFrom response:", JSON.stringify(data).slice(0, 500));
+          
+          if (data.video && Array.isArray(data.video)) {
+            const mp4Video = data.video.find((v: any) => v.url && v.ext === "mp4");
+            if (mp4Video?.url) {
+              console.log("[download-clip] Found SaveFrom link, proxying...");
+              const videoResponse = await fetch(mp4Video.url, {
+                headers: {
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                }
+              });
+              
+              if (videoResponse.ok) {
+                const videoBuffer = await videoResponse.arrayBuffer();
+                console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+                
+                return new NextResponse(videoBuffer, {
+                  headers: {
+                    "Content-Type": "video/mp4",
+                    "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
+                    "Content-Length": videoBuffer.byteLength.toString(),
+                  }
+                });
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.log("[download-clip] SaveFrom error:", e);
+      }
+    }
+
+    // Try social-download-all API
+    if (process.env.RAPIDAPI_KEY) {
+      try {
+        console.log("[download-clip] Trying social-download-all API...");
+        const response = await fetch(`https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink?url=${encodeURIComponent(youtubeUrl)}`, {
           method: "GET",
           headers: {
             "x-rapidapi-key": process.env.RAPIDAPI_KEY,
-            "x-rapidapi-host": "yt-api.p.rapidapi.com"
+            "x-rapidapi-host": "social-download-all-in-one.p.rapidapi.com"
           }
         });
         
         if (response.ok) {
           const data = await response.json();
+          console.log("[download-clip] social-download response:", JSON.stringify(data).slice(0, 500));
           
-          if (data.formats) {
-            const videoFormat = data.formats.find((f: any) => 
-              f.mimeType?.includes("video/mp4") && f.url
-            );
-            
-            if (videoFormat?.url) {
-              console.log("[download-clip] Got video URL from yt-api");
-              downloadUrl = videoFormat.url;
-              contentType = videoFormat.mimeType?.split(";")[0] || "video/mp4";
+          if (data.medias && Array.isArray(data.medias)) {
+            const mp4Media = data.medias.find((m: any) => m.url && m.extension === "mp4" && m.videoAvailable);
+            if (mp4Media?.url) {
+              console.log("[download-clip] Found social-download link, proxying...");
+              const videoResponse = await fetch(mp4Media.url, {
+                headers: {
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                }
+              });
+              
+              if (videoResponse.ok) {
+                const videoBuffer = await videoResponse.arrayBuffer();
+                console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+                
+                return new NextResponse(videoBuffer, {
+                  headers: {
+                    "Content-Type": "video/mp4",
+                    "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
+                    "Content-Length": videoBuffer.byteLength.toString(),
+                  }
+                });
+              }
             }
           }
         }
       } catch (e) {
-        console.log("[download-clip] yt-api error:", e);
+        console.log("[download-clip] social-download error:", e);
       }
     }
 
-    if (!downloadUrl) {
-      return NextResponse.json({
-        error: "Could not get download URL. Please try downloading directly from YouTube.",
-        youtubeUrl: `${youtubeUrl}&t=${start}`,
-        manualInstructions: `Open the YouTube video at timestamp ${start}s and use a screen recorder or YouTube's clip feature.`
-      }, { status: 503 });
-    }
-
-    // Proxy the video through our server to avoid IP-locking issues
-    console.log("[download-clip] Proxying video download...");
-    const videoResponse = await fetch(downloadUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Range": "bytes=0-",
-      }
-    });
-
-    if (!videoResponse.ok && videoResponse.status !== 206) {
-      console.log(`[download-clip] Video fetch failed: ${videoResponse.status}`);
-      return NextResponse.json({
-        error: "Failed to download video. Please try downloading directly from YouTube.",
-        youtubeUrl: `${youtubeUrl}&t=${start}`,
-      }, { status: 503 });
-    }
-
-    const videoBuffer = await videoResponse.arrayBuffer();
-    console.log(`[download-clip] Downloaded ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
-
-    return new NextResponse(videoBuffer, {
-      headers: {
-        "Content-Type": contentType,
-        "Content-Disposition": `attachment; filename="clip-${videoId}-${start}-${end}.mp4"`,
-        "Content-Length": videoBuffer.byteLength.toString(),
-      }
-    });
+    // All methods failed
+    return NextResponse.json({
+      error: "Could not download video. YouTube is blocking access.",
+      youtubeUrl: `${youtubeUrl}&t=${start}`,
+      manualInstructions: `Use a YouTube downloader site like y2mate.com or ssyoutube.com to download the video, then trim to ${start}s - ${end}s`
+    }, { status: 503 });
     
   } catch (error) {
     console.error("Download clip error:", error);
