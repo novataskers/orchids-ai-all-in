@@ -576,37 +576,48 @@ export default function OpusPage() {
                                 Watch on YouTube
                               </a>
                                 {videoId && (
-                                    <button
-                                      disabled={downloadingClipId === clip.id}
-                                      onClick={async () => {
-                                        setDownloadingClipId(clip.id);
-                                        const downloadUrl = `/api/opus/download-clip?videoId=${videoId}&start=${Math.floor(clip.start)}&end=${Math.floor(clip.end)}`;
-                                        try {
-                                          const res = await fetch(downloadUrl);
-                                          const contentType = res.headers.get("content-type") || "";
-                                          
-                                          if (contentType.includes("video")) {
-                                            const blob = await res.blob();
-                                            const url = URL.createObjectURL(blob);
-                                            const a = document.createElement("a");
-                                            a.href = url;
-                                            a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
-                                            document.body.appendChild(a);
-                                            a.click();
-                                            document.body.removeChild(a);
-                                            URL.revokeObjectURL(url);
-                                          } else {
-                                            alert("Download temporarily unavailable. Please try again in a few moments.");
+                                      <button
+                                        disabled={downloadingClipId === clip.id}
+                                        onClick={async () => {
+                                          setDownloadingClipId(clip.id);
+                                          const downloadUrl = `/api/opus/download-clip?videoId=${videoId}&start=${Math.floor(clip.start)}&end=${Math.floor(clip.end)}&json=true`;
+                                          try {
+                                            const res = await fetch(downloadUrl);
+                                            const data = await res.json();
+                                            
+                                            if (data.url) {
+                                              // Direct link download
+                                              const a = document.createElement("a");
+                                              a.href = data.url;
+                                              a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
+                                              document.body.appendChild(a);
+                                              a.click();
+                                              document.body.removeChild(a);
+                                            } else if (data.error) {
+                                              alert(`Download failed: ${data.error}`);
+                                            } else {
+                                              // Fallback if it's still returning a stream
+                                              const streamRes = await fetch(downloadUrl.replace("&json=true", ""));
+                                              const blob = await streamRes.blob();
+                                              const url = URL.createObjectURL(blob);
+                                              const a = document.createElement("a");
+                                              a.href = url;
+                                              a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
+                                              document.body.appendChild(a);
+                                              a.click();
+                                              document.body.removeChild(a);
+                                              URL.revokeObjectURL(url);
+                                            }
+                                          } catch (err) {
+                                            console.error("Download error:", err);
+                                            alert("Download failed. Please try again.");
+                                          } finally {
+                                            setDownloadingClipId(null);
                                           }
-                                        } catch (err) {
-                                          console.error("Download error:", err);
-                                          alert("Download failed. Please try again.");
-                                        } finally {
-                                          setDownloadingClipId(null);
-                                        }
-                                      }}
-                                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-mono hover:bg-purple-500 transition-colors disabled:opacity-50"
-                                    >
+                                        }}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-mono hover:bg-purple-500 transition-colors disabled:opacity-50"
+                                      >
+
                                       {downloadingClipId === clip.id ? (
                                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                       ) : (

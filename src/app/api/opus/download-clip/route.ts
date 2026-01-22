@@ -24,6 +24,8 @@ function findYtDlp(): string {
     "/usr/local/bin/yt-dlp",
     "/usr/bin/yt-dlp",
     "yt-dlp",
+    "yt-dlp.exe",
+    path.join(process.cwd(), "yt-dlp.exe"),
   ];
   
   for (const p of possiblePaths) {
@@ -61,8 +63,9 @@ export async function GET(request: NextRequest) {
   const videoId = searchParams.get("videoId");
   const start = searchParams.get("start");
   const end = searchParams.get("end");
+  const jsonMode = searchParams.get("json") === "true";
 
-  console.log(`[download-clip] Request: videoId=${videoId}, start=${start}, end=${end}`);
+  console.log(`[download-clip] Request: videoId=${videoId}, start=${start}, end=${end}, jsonMode=${jsonMode}`);
 
   if (!videoId || !start || !end) {
     return NextResponse.json({ error: "Missing parameters" }, { status: 400 });
@@ -85,6 +88,9 @@ export async function GET(request: NextRequest) {
         .createSignedUrl(fileName, 1800); // 30 mins
 
       if (data?.signedUrl) {
+        if (jsonMode) {
+          return NextResponse.json({ url: data.signedUrl });
+        }
         return NextResponse.redirect(data.signedUrl);
       }
     }
