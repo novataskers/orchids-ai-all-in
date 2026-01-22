@@ -83,16 +83,12 @@ export async function GET(request: NextRequest) {
 
     if (existingFile && existingFile.length > 0 && existingFile.some(f => f.name === fileName)) {
       console.log(`[download-clip] Clip already exists in storage: ${fileName}`);
-      const { data } = await supabase.storage
-        .from(bucketName)
-        .createSignedUrl(fileName, 1800); // 30 mins
-
-      if (data?.signedUrl) {
-        if (jsonMode) {
-          return NextResponse.json({ url: data.signedUrl });
-        }
-        return NextResponse.redirect(data.signedUrl);
+      const publicUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${bucketName}/${fileName}`;
+      
+      if (jsonMode) {
+        return NextResponse.json({ url: publicUrl });
       }
+      return NextResponse.redirect(publicUrl);
     }
   } catch (err) {
     console.error(`[download-clip] Error checking storage:`, err);
@@ -101,6 +97,33 @@ export async function GET(request: NextRequest) {
   const startSec = parseInt(start);
   const endSec = parseInt(end);
   const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  // Helper function to download using Cobalt as fallback
+  const downloadWithCobalt = async () => {
+    console.log(`[download-clip] Trying Cobalt fallback...`);
+    try {
+      const response = await fetch("https://api.cobalt.tools/api/json", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+        },
+        body: JSON.stringify({
+          url: youtubeUrl,
+          vQuality: "720",
+          filenameStyle: "basic",
+        }),
+      });
+      const data = await response.json();
+      if (data.url) {
+        console.log(`[download-clip] Cobalt returned URL: ${data.url}`);
+        return data.url;
+      }
+    } catch (err) {
+      console.error(`[download-clip] Cobalt error:`, err);
+    }
+    return null;
+  };
   const tempDir = os.tmpdir();
   const timestamp = Date.now();
   const outputPath = path.join(tempDir, `clip-${videoId}-${timestamp}.mp4`);
@@ -229,26 +252,45 @@ export async function GET(request: NextRequest) {
 
       try { fs.unlinkSync(finalOutput); } catch {}
 
-      // Get signed URL after upload (or just use public URL if it's public)
-      const { data } = await supabase.storage
-        .from(bucketName)
-        .createSignedUrl(fileName, 1800);
-
-      if (data?.signedUrl) {
-        return NextResponse.redirect(data.signedUrl);
+      const publicUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${bucketName}/${fileName}`;
+      if (jsonMode) {
+        return NextResponse.json({ url: publicUrl });
       }
-
-      // Fallback if signed URL fails but we have the buffer
-      return new NextResponse(fileBuffer, {
-        headers: {
-          "Content-Type": "video/mp4",
-          "Content-Disposition": `attachment; filename="${fileName}"`,
-          "Content-Length": fileBuffer.length.toString(),
-        }
-      });
+      return NextResponse.redirect(publicUrl);
     }
 
-    console.log(`[download-clip] yt-dlp failed: ${ytdlpResult.error}`);
+    // Fallback to Cobalt if yt-dlp failed
+    console.log(`[download-clip] yt-dlp failed, trying Cobalt fallback...`);
+    const cobaltUrl = await downloadWithCobalt();
+    if (cobaltUrl) {
+      // For Cobalt, we can just redirect to its URL or download and upload
+      // Since the user wants "Downloads work forever", we should download and upload to Supabase
+      try {
+        const cobaltRes = await fetch(cobaltUrl);
+        const cobaltBuffer = Buffer.from(await cobaltRes.arrayBuffer());
+        
+        console.log(`[download-clip] Uploading Cobalt content to Supabase: ${fileName}`);
+        await supabase.storage
+          .from(bucketName)
+          .upload(fileName, cobaltBuffer, {
+            contentType: 'video/mp4',
+            upsert: true
+          });
+          
+        const publicUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/${bucketName}/${fileName}`;
+        if (jsonMode) {
+          return NextResponse.json({ url: publicUrl });
+        }
+        return NextResponse.redirect(publicUrl);
+      } catch (cobaltDownloadErr) {
+        console.error(`[download-clip] Cobalt download/upload failed:`, cobaltDownloadErr);
+        // Last resort: just redirect to Cobalt URL
+        if (jsonMode) return NextResponse.json({ url: cobaltUrl });
+        return NextResponse.redirect(cobaltUrl);
+      }
+    }
+
+    console.log(`[download-clip] Both yt-dlp and Cobalt failed`);
     return NextResponse.json({ 
       error: "Download failed",
       details: ytdlpResult.error.slice(0, 500),
