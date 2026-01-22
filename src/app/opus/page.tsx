@@ -44,6 +44,7 @@ type GeneratedClip = {
   text: string;
   score: number;
   cobaltUrl?: string;
+  vizardUrl?: string;
 };
 
 type JobStatus = {
@@ -53,7 +54,7 @@ type JobStatus = {
   progress: number;
   videoInfo: VideoInfo;
   transcription?: { text: string; segments: unknown[] };
-  clips?: { items: GeneratedClip[]; zipUrl?: string; videoId?: string; youtubeUrl?: string };
+  clips?: { items: GeneratedClip[]; zipUrl?: string; videoId?: string; youtubeUrl?: string; vizardProjectId?: string };
   errorMessage?: string;
 };
 
@@ -64,12 +65,16 @@ const STEP_CONFIG: Record<string, { label: string }> = {
   finding_clips: { label: "Finding Best Parts" },
   downloading_video: { label: "Downloading Video" },
   cutting_clips: { label: "Cutting Clips" },
+  vizard_initializing: { label: "Vizard Cloud Setup" },
+  vizard_processing: { label: "Vizard AI Magic" },
   done: { label: "Complete" },
   error: { label: "Error" },
 };
 
 const PROCESSING_STEPS = [
   "downloading_audio",
+  "vizard_initializing",
+  "vizard_processing",
   "transcribing", 
   "finding_clips",
   "downloading_video",
@@ -565,58 +570,83 @@ export default function OpusPage() {
                             {clip.text && (
                               <p className="font-mono text-xs text-zinc-500 line-clamp-2 mb-2">{clip.text}</p>
                             )}
-                            <div className="flex items-center gap-2 mt-2">
-                              <a
-                                href={youtubeWatchUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-mono hover:bg-red-500 transition-colors"
-                              >
-                                <Youtube className="h-3.5 w-3.5" />
-                                Watch on YouTube
-                              </a>
-                                {videoId && (
-                                      <button
-                                        disabled={downloadingClipId === clip.id}
-                                        onClick={async () => {
-                                          setDownloadingClipId(clip.id);
-                                          const downloadUrl = `/api/opus/download-clip?videoId=${videoId}&start=${Math.floor(clip.start)}&end=${Math.floor(clip.end)}&json=true`;
-                                          try {
-                                            const res = await fetch(downloadUrl);
-                                            const data = await res.json();
+                              <div className="flex items-center gap-2 mt-2">
+                                <a
+                                  href={youtubeWatchUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-mono hover:bg-red-500 transition-colors"
+                                >
+                                  <Youtube className="h-3.5 w-3.5" />
+                                  Watch
+                                </a>
+                                {clip.vizardUrl && (
+                                  <a
+                                    href={clip.vizardUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-mono hover:bg-blue-500 transition-colors"
+                                  >
+                                    <ExternalLink className="h-3.5 w-3.5" />
+                                    Edit in Vizard
+                                  </a>
+                                )}
+                                  {videoId && (
+                                        <button
+                                          disabled={downloadingClipId === clip.id}
+                                          onClick={async () => {
+                                            setDownloadingClipId(clip.id);
                                             
-                                            if (data.url) {
-                                              // Direct link download
+                                            // If it's a Vizard URL, it's already a direct download link
+                                            if (clip.downloadUrl && clip.downloadUrl.includes('vizard.ai')) {
                                               const a = document.createElement("a");
-                                              a.href = data.url;
-                                              a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
+                                              a.href = clip.downloadUrl;
+                                              a.download = clip.filename;
                                               document.body.appendChild(a);
                                               a.click();
                                               document.body.removeChild(a);
-                                            } else if (data.error) {
-                                              alert(`Download failed: ${data.error}`);
-                                            } else {
-                                              // Fallback if it's still returning a stream
-                                              const streamRes = await fetch(downloadUrl.replace("&json=true", ""));
-                                              const blob = await streamRes.blob();
-                                              const url = URL.createObjectURL(blob);
-                                              const a = document.createElement("a");
-                                              a.href = url;
-                                              a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
-                                              document.body.appendChild(a);
-                                              a.click();
-                                              document.body.removeChild(a);
-                                              URL.revokeObjectURL(url);
+                                              setDownloadingClipId(null);
+                                              return;
                                             }
-                                          } catch (err) {
-                                            console.error("Download error:", err);
-                                            alert("Download failed. Please try again.");
-                                          } finally {
-                                            setDownloadingClipId(null);
-                                          }
-                                        }}
-                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-mono hover:bg-purple-500 transition-colors disabled:opacity-50"
-                                      >
+
+                                            const downloadUrl = `/api/opus/download-clip?videoId=${videoId}&start=${Math.floor(clip.start)}&end=${Math.floor(clip.end)}&json=true`;
+                                            try {
+                                              const res = await fetch(downloadUrl);
+                                              const data = await res.json();
+                                              
+                                              if (data.url) {
+                                                // Direct link download
+                                                const a = document.createElement("a");
+                                                a.href = data.url;
+                                                a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
+                                                document.body.appendChild(a);
+                                                a.click();
+                                                document.body.removeChild(a);
+                                              } else if (data.error) {
+                                                alert(`Download failed: ${data.error}`);
+                                              } else {
+                                                // Fallback if it's still returning a stream
+                                                const streamRes = await fetch(downloadUrl.replace("&json=true", ""));
+                                                const blob = await streamRes.blob();
+                                                const url = URL.createObjectURL(blob);
+                                                const a = document.createElement("a");
+                                                a.href = url;
+                                                a.download = `clip-${videoId}-${Math.floor(clip.start)}-${Math.floor(clip.end)}.mp4`;
+                                                document.body.appendChild(a);
+                                                a.click();
+                                                document.body.removeChild(a);
+                                                URL.revokeObjectURL(url);
+                                              }
+                                            } catch (err) {
+                                              console.error("Download error:", err);
+                                              alert("Download failed. Please try again.");
+                                            } finally {
+                                              setDownloadingClipId(null);
+                                            }
+                                          }}
+                                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs font-mono hover:bg-purple-500 transition-colors disabled:opacity-50"
+                                        >
+
 
                                       {downloadingClipId === clip.id ? (
                                         <Loader2 className="h-3.5 w-3.5 animate-spin" />

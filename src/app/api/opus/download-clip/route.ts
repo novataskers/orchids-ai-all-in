@@ -116,7 +116,7 @@ export async function GET(request: NextRequest) {
   const startTimeStr = formatTime(startSec);
   const endTimeStr = formatTime(endSec);
   
-  const args = [
+  const baseArgs = [
     "--no-warnings",
     "--no-playlist",
     "--download-sections", `*${startTimeStr}-${endTimeStr}`,
@@ -125,26 +125,29 @@ export async function GET(request: NextRequest) {
     "--merge-output-format", "mp4",
     "--retries", "5",
     "--fragment-retries", "5",
+    "--no-check-certificates",
+    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "-o", outputPath,
     youtubeUrl
   ];
 
-  const proxyUrl = process.env.BRIGHT_DATA_PROXY_URL;
-  if (proxyUrl) {
-    args.unshift("--proxy", proxyUrl);
-    console.log(`[download-clip] Using Bright Data proxy`);
-  }
-
   if (hasCookies && fs.existsSync(cookiePath)) {
-    args.unshift("--cookies", cookiePath);
+    baseArgs.unshift("--cookies", cookiePath);
     console.log(`[download-clip] Using cookies`);
   }
 
-  console.log(`[download-clip] Running yt-dlp with ffmpeg trimming...`);
-  console.log(`[download-clip] Command: ${ytDlpPath} ${args.join(' ')}`);
+  const runYtDlp = async (useProxy: boolean) => {
+    const args = [...baseArgs];
+    const proxyUrl = process.env.BRIGHT_DATA_PROXY_URL;
+    if (useProxy && proxyUrl) {
+      args.unshift("--proxy", proxyUrl);
+      console.log(`[download-clip] Attempting with Bright Data proxy...`);
+    } else {
+      console.log(`[download-clip] Attempting WITHOUT proxy...`);
+    }
 
-  try {
-    const ytdlpResult = await new Promise<{ success: boolean; error: string }>((resolve) => {
+    console.log(`[download-clip] Running yt-dlp...`);
+    return new Promise<{ success: boolean; error: string }>((resolve) => {
       const ytdlp = spawn(ytDlpPath, args, { timeout: 240000 });
       let stderr = "";
       
@@ -167,6 +170,16 @@ export async function GET(request: NextRequest) {
         resolve({ success: false, error: err.message });
       });
     });
+  };
+
+  try {
+    let ytdlpResult = await runYtDlp(!!process.env.BRIGHT_DATA_PROXY_URL);
+
+    // Retry without proxy if proxy failed
+    if (!ytdlpResult.success && process.env.BRIGHT_DATA_PROXY_URL) {
+      console.log(`[download-clip] Proxy attempt failed, retrying without proxy...`);
+      ytdlpResult = await runYtDlp(false);
+    }
 
     if (fs.existsSync(cookiePath)) {
       try { fs.unlinkSync(cookiePath); } catch {}

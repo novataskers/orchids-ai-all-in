@@ -6,6 +6,7 @@ import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { VizardClient } from "@/lib/vizard";
 
 const execAsync = promisify(exec);
 
@@ -429,6 +430,25 @@ export async function POST(request: NextRequest) {
         throw new Error("No video ID found for this job");
       }
 
+      // Check if Vizard.ai should be used
+      if (process.env.VIZARDAI_API_KEY) {
+        console.log("[opus] Using Vizard.ai for processing...");
+        await updateJob(jobId, { status: "processing", current_step: "vizard_initializing", progress: 10 });
+        
+        const vizard = new VizardClient();
+        const vizardProjectId = await vizard.createProject(job.youtube_url || `https://www.youtube.com/watch?v=${videoId}`);
+        
+        await updateJob(jobId, { 
+          vizard_project_id: vizardProjectId,
+          current_step: "vizard_processing",
+          progress: 30
+        });
+
+        // The job-status route will handle polling Vizard.ai
+        return NextResponse.json({ success: true, jobId, vizardProjectId });
+      }
+
+      // Fallback to manual process if Vizard.ai is not available
       await updateJob(jobId, { status: "processing", current_step: "downloading_audio", progress: 10 });
 
       const audioBuffer = await downloadYouTubeAudio(videoId);
