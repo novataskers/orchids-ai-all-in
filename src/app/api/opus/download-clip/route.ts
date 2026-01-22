@@ -3,6 +3,12 @@ import { spawn, execSync } from "child_process";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
 export const maxDuration = 300;
 
@@ -60,6 +66,30 @@ export async function GET(request: NextRequest) {
 
   if (!videoId || !start || !end) {
     return NextResponse.json({ error: "Missing parameters" }, { status: 400 });
+  }
+
+  const fileName = `clip-${videoId}-${start}-${end}.mp4`;
+  const bucketName = 'clips';
+
+  try {
+    // 1. Check if clip already exists in Supabase Storage
+    console.log(`[download-clip] Checking if ${fileName} exists in ${bucketName}`);
+    const { data: existingFile } = await supabase.storage
+      .from(bucketName)
+      .list('', { search: fileName });
+
+    if (existingFile && existingFile.length > 0 && existingFile.some(f => f.name === fileName)) {
+      console.log(`[download-clip] Clip already exists in storage: ${fileName}`);
+      const { data } = await supabase.storage
+        .from(bucketName)
+        .createSignedUrl(fileName, 1800); // 30 mins
+
+      if (data?.signedUrl) {
+        return NextResponse.redirect(data.signedUrl);
+      }
+    }
+  } catch (err) {
+    console.error(`[download-clip] Error checking storage:`, err);
   }
 
   const startSec = parseInt(start);
@@ -158,12 +188,42 @@ export async function GET(request: NextRequest) {
     if (ytdlpResult.success && finalOutput) {
       console.log(`[download-clip] Success! Output: ${finalOutput}`);
       const fileBuffer = fs.readFileSync(finalOutput);
+
+      try {
+        // Upload to Supabase Storage
+        console.log(`[download-clip] Uploading to Supabase Storage: ${fileName}`);
+        const { error: uploadError } = await supabase.storage
+          .from(bucketName)
+          .upload(fileName, fileBuffer, {
+            contentType: 'video/mp4',
+            upsert: true
+          });
+
+        if (uploadError) {
+          console.error(`[download-clip] Upload error:`, uploadError);
+        } else {
+          console.log(`[download-clip] Successfully uploaded to storage`);
+        }
+      } catch (err) {
+        console.error(`[download-clip] Storage upload exception:`, err);
+      }
+
       try { fs.unlinkSync(finalOutput); } catch {}
 
+      // Get signed URL after upload (or just use public URL if it's public)
+      const { data } = await supabase.storage
+        .from(bucketName)
+        .createSignedUrl(fileName, 1800);
+
+      if (data?.signedUrl) {
+        return NextResponse.redirect(data.signedUrl);
+      }
+
+      // Fallback if signed URL fails but we have the buffer
       return new NextResponse(fileBuffer, {
         headers: {
           "Content-Type": "video/mp4",
-          "Content-Disposition": `attachment; filename="clip-${videoId}.mp4"`,
+          "Content-Disposition": `attachment; filename="${fileName}"`,
           "Content-Length": fileBuffer.length.toString(),
         }
       });
