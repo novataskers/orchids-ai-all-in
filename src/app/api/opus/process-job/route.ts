@@ -448,44 +448,43 @@ export async function POST(request: NextRequest) {
 
       const engagingClips = findEngagingClips(segments, job.clip_duration, job.max_clips);
 
-      if (engagingClips.length === 0) {
-        throw new Error("Could not find suitable clips in the video");
+      console.log(`[opus] Found ${engagingClips.length} engaging clips. Triggering Klap.app API...`);
+
+      // Trigger Klap.app API
+      const klapResponse = await fetch("https://api.klap.app/v1/generate", {
+        method: "POST",
+        headers: {
+          "x-api-key": process.env.KLAP_API_KEY!,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: job.youtube_url,
+          platform: "tiktok",
+          language: "en",
+        }),
+      });
+
+      if (!klapResponse.ok) {
+        const errorText = await klapResponse.text();
+        throw new Error(`Klap.app API error: ${klapResponse.status} ${errorText}`);
       }
 
-      console.log(`[opus] Found ${engagingClips.length} engaging clips`);
+      const klapData = await klapResponse.json();
+      const klapId = klapData.id || klapData.job_id;
 
-      await updateJob(jobId, { current_step: "generating_clips", progress: 80 });
+      if (!klapId) {
+        throw new Error("Klap.app did not return a job ID");
+      }
 
-      const generatedClips = engagingClips.map((clip, idx) => {
-        const startTime = Math.floor(clip.start);
-        const endTime = Math.ceil(clip.end);
-        
-        return {
-          id: idx + 1,
-          filename: `clip_${idx + 1}_${startTime}s-${endTime}s.mp4`,
-          downloadUrl: `https://www.youtube.com/watch?v=${videoId}&t=${startTime}`,
-          thumbnailUrl: `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
-          start: clip.start,
-          end: clip.end,
-          duration: clip.duration,
-          text: clip.text,
-          score: clip.score,
-          cobaltUrl: buildCobaltDownloadUrl(videoId, startTime, endTime),
-        };
+      console.log(`[opus] Klap job created: ${klapId}`);
+
+      await updateJob(jobId, { 
+        klap_id: klapId,
+        current_step: "generating_clips", 
+        progress: 80 
       });
 
-      await updateJob(jobId, {
-        status: "completed",
-        current_step: "done",
-        progress: 100,
-        clips: {
-          items: generatedClips,
-          videoId: videoId,
-          youtubeUrl: job.youtube_url,
-        },
-      });
-
-      return NextResponse.json({ success: true, jobId });
+      return NextResponse.json({ success: true, jobId, klapId });
 
     } catch (processError) {
       console.error("Job processing error:", processError);

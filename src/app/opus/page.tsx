@@ -580,6 +580,20 @@ export default function OpusPage() {
                                         disabled={downloadingClipId === clip.id}
                                         onClick={async () => {
                                           setDownloadingClipId(clip.id);
+                                          
+                                          // If it's a direct Klap URL, use it
+                                          if (clip.downloadUrl && (clip.downloadUrl.includes("klap.app") || clip.downloadUrl.includes("http"))) {
+                                            const a = document.createElement("a");
+                                            a.href = clip.downloadUrl;
+                                            a.target = "_blank";
+                                            a.download = clip.filename || `clip-${clip.id}.mp4`;
+                                            document.body.appendChild(a);
+                                            a.click();
+                                            document.body.removeChild(a);
+                                            setDownloadingClipId(null);
+                                            return;
+                                          }
+
                                           const downloadUrl = `/api/opus/download-clip?videoId=${videoId}&start=${Math.floor(clip.start)}&end=${Math.floor(clip.end)}&json=true`;
                                           try {
                                             const res = await fetch(downloadUrl);
